@@ -41,6 +41,32 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     )
 
 
+async def validation_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """把 FastAPI/Pydantic 的 422 转成统一错误体。
+
+    Pydantic 原始 errors() 里 ctx 可能含 ValueError 对象，不能直接 json 序列化，
+    这里只保留 loc / msg / type 三个字段。
+    """
+    raw_errors = getattr(exc, "errors", lambda: [])()
+    errors = [
+        {
+            "loc": [str(part) for part in item.get("loc", ())],
+            "msg": str(item.get("msg", "")),
+            "type": str(item.get("type", "")),
+        }
+        for item in raw_errors
+    ]
+    return JSONResponse(
+        status_code=422,
+        content={
+            "code": "VALIDATION_ERROR",
+            "message": "参数校验失败",
+            "request_id": getattr(request.state, "request_id", None),
+            "detail": {"errors": errors},
+        },
+    )
+
+
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     # 完整堆栈只进日志，绝不返回给客户端
     logger.exception("未捕获异常: %s %s", request.method, request.url.path)

@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.endpoints import health
@@ -19,6 +20,7 @@ from app.core.errors import (
     AppError,
     app_error_handler,
     unhandled_exception_handler,
+    validation_exception_handler,
 )
 from app.core.logging import setup_logging
 
@@ -73,6 +75,7 @@ def create_app() -> FastAPI:
         return response
 
     app.add_exception_handler(AppError, app_error_handler)
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
 
     app.include_router(health.router)
