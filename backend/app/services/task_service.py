@@ -1,4 +1,4 @@
-"""待办业务逻辑层 —— 这一层由你实现。
+"""待办业务逻辑层。
 
 调用链：路由层（plumbing，已写好）→ **service（本层，业务规则）** → repository（已写好）→ 数据库
 
@@ -7,19 +7,29 @@
 2. user_id 永远由路由层从依赖注入传入，绝不允许从请求体读取
 3. 查不到资源一律抛 `not_found()`（404），**不要抛 403**——避免泄露资源是否存在
 4. 进入本层时时间为 naive UTC；出参由 TaskOut 统一转成 +08:00
-
-已实现两个示例：`list_tasks` / `get_task`。照它们的风格实现剩下 4 个。
 """
 
 from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from app.core.errors import not_found
+from app.core.errors import not_found, validation_error
 from app.core.time import now_utc, to_utc_naive
 from app.models.task import Task
+from app.repositories.category_repo import CategoryRepository
 from app.repositories.task_repo import TaskRepository
 from app.schemas.task import TaskCreate, TaskUpdate
+
+CATEGORY_SCOPE = "task"
+
+# 这些字段数据库不允许为 NULL：客户端传 null 时按「不改」处理，而不是写坏数据
+NOT_NULLABLE_FIELDS = ("title", "category_id", "priority")
+
+
+def _ensure_category(db: Session, user_id: int, category_id: int) -> None:
+    """分类必须属于 task 用途域，且是系统预置或本人自建；0 表示未分类，合法。"""
+    if not CategoryRepository(db).exists_in_scope(category_id, CATEGORY_SCOPE, user_id):
+        raise validation_error("分类不存在")
 
 
 def list_tasks(db: Session, user_id: int, **filters) -> tuple[list[Task], int]:
@@ -51,73 +61,93 @@ def get_task(db: Session, user_id: int, task_id: int) -> Task:
 
 
 def create_task(db: Session, user_id: int, payload: TaskCreate) -> Task:
-    """TODO 待你实现：新建待办。
+    """新建待办。
 
-    需要做的事：
-      1. 校验 `payload.category_id`：必须属于 `scope="task"`，且是系统预置或本人自建。
-         可用 `CategoryRepository(db).exists_in_scope(category_id, "task", user_id)`，
-         不合法时抛 `validation_error("分类不存在")`（from app.core.errors import validation_error）
-      2. 时间字段 `due_at` / `remind_at` 用 `to_utc_naive()` 转成 naive UTC 再存
-      3. 组装 `Task`：`user_id` 用参数传进来的值，`source="manual"`，`status="todo"`
-      4. `TaskRepository(db).add(task)` → `db.commit()` → `db.refresh(task)`
-      5. 返回 task
-
-    验收标准（tests/test_tasks.py 中的用例）：
-      - test_create_task_ok           201，title/category_name 正确，due_at 带 +08:00
-      - test_create_task_blank_title  422（Schema 已拦截，确认错误体能透出）
-      - test_create_task_bad_category 422，message 为「分类不存在」
-      - test_create_task_remind_after_due 422，message 含「提醒时间必须早于截止时间」
+    顺序：校验分类 → 转时间 → 组装对象 → 落库提交 → 回读。
     """
-    raise NotImplementedError("create_task 待你实现（见函数 docstring）")
+    _ensure_category(db, user_id, payload.category_id)
+
+    due_at = to_utc_naive(payload.due_at) if payload.due_at else None
+    remind_at = to_utc_naive(payload.remind_at) if payload.remind_at else None
+    # Schema 已在入参层拦过一遍；这里用统一时区再判一次，防止两个字段一个带偏移一个不带
+    if due_at is not None and remind_at is not None and remind_at >= due_at:
+        raise validation_error("提醒时间必须早于截止时间")
+
+    task = Task(
+        user_id=user_id,  # 只能来自依赖注入，绝不读请求体
+        title=payload.title,
+        description=payload.description,
+        category_id=payload.category_id,
+        priority=payload.priority,
+        status="todo",
+        source="manual",
+        due_at=due_at,
+        remind_at=remind_at,
+    )
+    TaskRepository(db).add(task)
+    db.commit()
+    db.refresh(task)  # 取回 created_at / updated_at 等数据库生成的默认值
+    return task
 
 
 def update_task(db: Session, user_id: int, task_id: int, payload: TaskUpdate) -> Task:
-    """TODO 待你实现：局部更新。
+    """局部更新。
 
-    需要做的事：
-      1. 先 `get_task()` 拿到对象（不存在抛 404）
-      2. **只更新显式传了的字段**：用 `payload.model_dump(exclude_unset=True)`
-         注意区分「没传这个键」和「传了 null」——后者表示清空（例如 due_at=null）
-      3. 时间字段转 naive UTC；若改了 category_id，同样要校验归属
-      4. `db.commit()` + `db.refresh(task)`
-
-    验收标准：
-      - test_update_partial        只改 title，description/priority 保持不变
-      - test_update_clear_due      显式传 due_at=null 后，响应里 due_at 为 null
-      - test_update_not_found      改不存在的 ID → 404
+    关键点：`exclude_unset=True` 才能区分「没传这个键」（不改）和「传了 null」（清空）。
     """
-    raise NotImplementedError("update_task 待你实现（见函数 docstring）")
+    task = get_task(db, user_id, task_id)
+    data = payload.model_dump(exclude_unset=True)
+
+    if data.get("category_id") is not None:
+        _ensure_category(db, user_id, data["category_id"])
+
+    for key in ("due_at", "remind_at"):
+        if data.get(key) is not None:
+            data[key] = to_utc_naive(data[key])
+
+    # 只改了一个时间字段时，另一个要用库里的现值一起判断先后
+    due_at = data["due_at"] if "due_at" in data else task.due_at
+    remind_at = data["remind_at"] if "remind_at" in data else task.remind_at
+    if due_at is not None and remind_at is not None and remind_at >= due_at:
+        raise validation_error("提醒时间必须早于截止时间")
+
+    for key, value in data.items():
+        if value is None and key in NOT_NULLABLE_FIELDS:
+            continue  # 这些列不允许 NULL，null 视为「不改」
+        setattr(task, key, value)
+
+    db.commit()
+    db.refresh(task)
+    return task
 
 
 def change_status(db: Session, user_id: int, task_id: int, status: str) -> Task:
-    """TODO 待你实现：状态切换 —— 本模块最值得动手写的一个。
+    """状态切换。
 
-    业务规则：
-      1. 目标状态为 `"done"` 时，把 `completed_at` 设为 `now_utc()`
-      2. 目标状态不是 `"done"` 时（退回 todo/doing，或标为 cancelled），
-         把 `completed_at` 清空为 `None`
-      3. 幂等：已经是 done 的任务再次设为 done，`completed_at` **保持第一次的时间不变**
-         （提示：先判断 `task.status == "done"`，再决定是否写时间）
-      4. 状态值合法性由 Schema 的 Literal 保证，本层可不再重复校验
-
-    验收标准：
-      - test_status_to_done_sets_completed_at   completed_at 不为 null
-      - test_status_reopen_clears_completed_at  改回 todo 后 completed_at 为 null
-      - test_status_idempotent                  连续两次 done，completed_at 不变
+    业务规则：进入 done 时记录完成时间；离开 done 时清空完成时间；
+    重复设为 done 不刷新完成时间（幂等）。
     """
-    raise NotImplementedError("change_status 待你实现（见函数 docstring）")
+    task = get_task(db, user_id, task_id)
+
+    if status == "done":
+        # 已经是 done 就不动 completed_at，保留第一次完成的时间
+        if task.status != "done" or task.completed_at is None:
+            task.completed_at = now_utc()
+    else:
+        task.completed_at = None
+
+    task.status = status
+    db.commit()
+    db.refresh(task)
+    return task
 
 
 def delete_task(db: Session, user_id: int, task_id: int) -> None:
-    """TODO 待你实现：软删除。
+    """软删除：只打 deleted_at，不物理删除。
 
-    需要做的事：
-      1. 先 `get_task()`（不存在抛 404）
-      2. `TaskRepository(db).soft_delete(task)` —— **只打 deleted_at，不物理删除**
-      3. `db.commit()`
-
-    验收标准：
-      - test_delete_then_get_404   删除后 GET 返回 404
-      - test_delete_twice_404      第二次删除也是 404（不能变成 500）
+    已删除的记录在 repository 的 `deleted_at IS NULL` 条件下查不到，
+    所以第二次删除自然落到 404，不会变成 500。
     """
-    raise NotImplementedError("delete_task 待你实现（见函数 docstring）")
+    task = get_task(db, user_id, task_id)
+    TaskRepository(db).soft_delete(task)
+    db.commit()

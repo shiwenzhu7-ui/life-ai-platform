@@ -1,11 +1,6 @@
 """待办模块验收测试 —— 这些用例就是 service 层的实现规格。
 
-当前状态：
-    list_tasks / get_task            已实现（示例代码）
-    create_task / update_task        待你实现 → 会失败
-    change_status / delete_task      待你实现 → 会失败
-
-实现完 service 里的 4 个 TODO 后，本文件应全部通过。
+service 里 6 个函数已全部实现，本文件应全部通过。
 只跑本文件：`pytest tests/test_tasks.py -v`
 """
 
@@ -19,6 +14,13 @@ from app.models import Task
 CST = timezone(timedelta(hours=8))
 
 BASE = "/api/v1/tasks"
+
+# 用例里的截止时间必须相对「现在」生成：写死具体日期会在该日期过后变成「已逾期」，
+# 让 test_create_task_ok / test_timezone_roundtrip 出现与实现无关的失败。
+FUTURE_DUE = (datetime.now(CST) + timedelta(days=3)).replace(
+    hour=15, minute=0, second=0, microsecond=0
+)
+FUTURE_DUE_ISO = FUTURE_DUE.isoformat()
 
 
 def _create(client, **overrides) -> dict:
@@ -61,7 +63,7 @@ def test_create_task_ok(client, task_category_ids) -> None:
         title="去超市买牛奶和鸡蛋",
         category_id=shopping_id,
         priority="high",
-        due_at="2026-05-02T15:00:00+08:00",
+        due_at=FUTURE_DUE_ISO,
     )
     assert body["title"] == "去超市买牛奶和鸡蛋"
     assert body["category_id"] == shopping_id
@@ -91,8 +93,8 @@ def test_create_task_remind_after_due(client) -> None:
         BASE,
         json={
             "title": "测试",
-            "due_at": "2026-05-02T15:00:00+08:00",
-            "remind_at": "2026-05-02T16:00:00+08:00",
+            "due_at": FUTURE_DUE_ISO,
+            "remind_at": (FUTURE_DUE + timedelta(hours=1)).isoformat(),
         },
     )
     assert resp.status_code == 422
@@ -101,11 +103,11 @@ def test_create_task_remind_after_due(client) -> None:
 
 def test_timezone_roundtrip(client) -> None:
     """带 +08:00 的时间写入后，读出来仍是同一时刻、同一偏移。"""
-    body = _create(client, due_at="2026-05-02T15:00:00+08:00")
-    assert body["due_at"] == "2026-05-02T15:00:00+08:00"
+    body = _create(client, due_at=FUTURE_DUE_ISO)
+    assert body["due_at"] == FUTURE_DUE_ISO
 
     fetched = client.get(f"{BASE}/{body['id']}").json()
-    assert fetched["due_at"] == "2026-05-02T15:00:00+08:00"
+    assert fetched["due_at"] == FUTURE_DUE_ISO
 
 
 # ---------- 修改（update_task 待实现） ----------
@@ -123,7 +125,7 @@ def test_update_partial(client) -> None:
 
 def test_update_clear_due(client) -> None:
     """显式传 null 应清空字段 —— 与「没传这个键」是不同的语义。"""
-    task = _create(client, due_at="2026-05-02T15:00:00+08:00")
+    task = _create(client, due_at=FUTURE_DUE_ISO)
     resp = client.patch(f"{BASE}/{task['id']}", json={"due_at": None})
     assert resp.status_code == 200
     assert resp.json()["due_at"] is None
