@@ -1,0 +1,61 @@
+# ---------- Python / FastAPI ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ---------- Node / Vue ----------
+node_modules/
+dist/
+.npm/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+.eslintcache
+
+# ---------- 环境变量与密钥（严禁提交） ----------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+keycloak/*.json.bak
+
+# ---------- 上传文件与向量数据 ----------
+backend/uploads/
+backend/storage/
+data/
+milvus/
+volumes/
+
+# ---------- IDE / 系统 ----------
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- 日志与临时文件 ----------
+logs/
+*.log
+tmp/
+temp/
+dsh-acl-recovery/
