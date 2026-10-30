@@ -13,6 +13,12 @@ _FORMAT = "%(asctime)s | %(levelname)-7s | %(name)-28s | %(message)s"
 
 
 def setup_logging() -> None:
+    # Windows 控制台默认 GBK，中文日志会显示成乱码，这里强制 UTF-8 输出
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):  # 非交互式输出流不支持 reconfigure
+        pass
+
     level = getattr(logging, settings.log_level.upper(), logging.INFO)
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(logging.Formatter(_FORMAT, datefmt="%Y-%m-%d %H:%M:%S"))
