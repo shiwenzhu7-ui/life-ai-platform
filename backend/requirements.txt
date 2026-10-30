@@ -1,0 +1,23 @@
+# LifeAI 后端依赖（直接安装用）
+# 实际锁定版本见 requirements.lock.txt（pip freeze 生成）
+# 安装：pip install -r requirements.txt
+
+# Web
+fastapi
+uvicorn[standard]
+
+# 数据库
+SQLAlchemy
+alembic
+PyMySQL
+cryptography
+
+# 配置
+pydantic
+pydantic-settings
+tzdata
+
+# 测试
+pytest
+pytest-asyncio
+httpx
