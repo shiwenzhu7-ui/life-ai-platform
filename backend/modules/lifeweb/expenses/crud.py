@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from core.time import beijing_day_start_utc, to_utc_naive
 from modules.lifeweb.expenses.model import Expense
-from modules.lifeweb.expenses.schema import ExpenseCreate
+from modules.lifeweb.expenses.schema import ExpenseCreate, ExpenseUpdate
 
 
 def _base_query(user_id: int) -> Select:
@@ -133,6 +133,30 @@ def create(db: Session, user_id: int, payload: ExpenseCreate) -> Expense:
         source="manual",
     )
     db.add(expense)
+    db.commit()
+    db.refresh(expense)
+    return expense
+
+
+def update(db: Session, expense: Expense, payload: ExpenseUpdate) -> Expense:
+    """局部更新：只把「请求里真的出现过」的字段写到对象上。
+
+    exclude_unset=True 是这一步的核心：
+      model_dump()                    → 把所有字段都导出（没传的变成 None）→ 会把备注清空
+      model_dump(exclude_unset=True)  → 只导出现过的键 → 没传的字段保持原值
+
+    判据是 Pydantic 的 model_fields_set。注意 {"note": null} 与 {} 的属性值都是
+    None，区别只在 fields_set —— 所以不能靠「值是不是 None」判断有没传。
+
+    updated_at 不用手动写：model 里那一列带 onupdate=func.now()，
+    这次 UPDATE 只要有列变化，数据库自己会刷新它。
+    """
+    changes = payload.model_dump(exclude_unset=True)
+    for key, value in changes.items():
+        if key == "occurred_at":
+            value = to_utc_naive(value)  # 库里只存 naive UTC
+        setattr(expense, key, value)
+
     db.commit()
     db.refresh(expense)
     return expense

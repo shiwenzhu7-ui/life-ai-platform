@@ -21,7 +21,7 @@ from modules.shared.categories import crud as categories_crud
 from modules.shared.pagination import Page
 from modules.lifeweb.expenses import crud
 from modules.lifeweb.expenses.model import Expense
-from modules.lifeweb.expenses.schema import ExpenseCreate, ExpenseOut, ExpenseType
+from modules.lifeweb.expenses.schema import ExpenseCreate, ExpenseOut, ExpenseType, ExpenseUpdate
 
 router = APIRouter(prefix="/expenses", tags=["消费"])
 
@@ -156,4 +156,37 @@ def get_expense(
     拦成 422（loc = ["path", "expense_id"]），不用手写类型判断。
     """
     expense = _get_or_404(db, user_id, expense_id)
+    return ExpenseOut.from_model(expense, categories_crud.name_map(db))
+
+
+@router.patch("/{expense_id}", response_model=ExpenseOut, summary="改一笔")
+def update_expense(
+    expense_id: int,
+    payload: ExpenseUpdate,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> ExpenseOut:
+    """局部更新：只改请求里出现的字段，其余保持原样。
+
+    两件要查库/看时钟的事，且**只看出现过的字段**：
+      1. 传了 occurred_at → 重新检查「不能晚于当前时间 + 1 天」
+      2. 传了 type 或 category_id → 用「合并后的最终状态」重新检查分类域
+
+    第 2 条里“合并”是关键：只传一半时必须拿库里的旧值补齐，否则
+    「库里的 income/工资，请求只传 category_id=1（餐饮）」会被误判成合法。
+    """
+    expense = _get_or_404(db, user_id, expense_id)
+    changed = payload.model_fields_set
+
+    if "occurred_at" in changed:
+        _check_occurred_at(payload.occurred_at)
+
+    if changed & {"type", "category_id"}:
+        final_type = payload.type if "type" in changed else expense.type
+        final_category = (
+            payload.category_id if "category_id" in changed else expense.category_id
+        )
+        _check_category(db, user_id, final_category, scope=final_type)
+
+    expense = crud.update(db, expense, payload)
     return ExpenseOut.from_model(expense, categories_crud.name_map(db))
