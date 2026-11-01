@@ -12,8 +12,9 @@
 app.py 会 import 本模块，所以服务一启动元数据就是完整的。
 """
 
+from modules.lifeweb.expenses.model import Expense  # noqa: F401
 from modules.lifeweb.tasks.model import Task  # noqa: F401
 from modules.shared.categories.model import Category  # noqa: F401
 from modules.shared.users.model import User  # noqa: F401
 
-__all__ = ["Category", "Task", "User"]
+__all__ = ["Category", "Expense", "Task", "User"]
