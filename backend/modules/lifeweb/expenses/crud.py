@@ -99,6 +99,17 @@ def list_for_user(
     return items, int(total)
 
 
+def get_for_user(db: Session, user_id: int, expense_id: int) -> Expense | None:
+    """取一笔账；取不到返回 None，由 router 决定怎么回（这里不抛 HTTP 异常）。
+
+    复用 _base_query 是关键，它自带两个条件：
+      - user_id == 当前用户：别人的记录查不到 → router 回 404（不是 403，
+        403 等于告诉对方「这条数据存在，只是你没权限」，能被用来探测别人有多少条）
+      - deleted_at IS NULL：已软删的记录查不到 → 也是 404
+    """
+    return db.scalars(_base_query(user_id).where(Expense.id == expense_id)).first()
+
+
 def create(db: Session, user_id: int, payload: ExpenseCreate) -> Expense:
     """记一笔。
 

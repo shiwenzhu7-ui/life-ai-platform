@@ -15,11 +15,12 @@ from sqlalchemy.orm import Session
 
 from core.db import get_db
 from core.deps import get_current_user_id
-from core.errors import validation_error
+from core.errors import not_found, validation_error
 from core.time import now_utc, to_utc_naive
 from modules.shared.categories import crud as categories_crud
 from modules.shared.pagination import Page
 from modules.lifeweb.expenses import crud
+from modules.lifeweb.expenses.model import Expense
 from modules.lifeweb.expenses.schema import ExpenseCreate, ExpenseOut, ExpenseType
 
 router = APIRouter(prefix="/expenses", tags=["消费"])
@@ -52,6 +53,19 @@ def _check_occurred_at(occurred_at) -> None:
     limit = now_utc() + timedelta(days=FUTURE_DAYS)
     if to_utc_naive(occurred_at) > limit:
         raise validation_error(f"发生时间不能晚于当前时间 {FUTURE_DAYS} 天")
+
+
+
+def _get_or_404(db: Session, user_id: int, expense_id: int) -> Expense:
+    """取一笔账，取不到就 404 —— 详情 / 修改 / 删除三个接口共用这一个入口。
+
+    统一在这里抛，好处是「别人记录的 404」和「已软删记录的 404」只写一次，
+    三个接口不可能各自漏掉一个条件。
+    """
+    expense = crud.get_for_user(db, user_id, expense_id)
+    if expense is None:
+        raise not_found("收支记录不存在")
+    return expense
 
 
 
@@ -119,4 +133,27 @@ def create_expense(
     _check_category(db, user_id, payload.category_id, scope=payload.type)
 
     expense = crud.create(db, user_id, payload)
+    return ExpenseOut.from_model(expense, categories_crud.name_map(db))
+
+
+# 注意：/expenses/summary（第 7 步）是固定路径，必须写在这里 —— 在 /{expense_id} 之前，
+# 否则 "summary" 会被当成 id 解析成 int，直接 422 int_parsing。
+
+
+@router.get("/{expense_id}", response_model=ExpenseOut, summary="一笔的详情")
+def get_expense(
+    expense_id: int,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> ExpenseOut:
+    """单笔详情，形状与列表里的单条**完全相同**。
+
+    谁在用：消费页点某行的 ✏ 时，把详情回填进「改一笔」抽屉。
+    为什么不用列表里那一行凑：列表是当前页的快照，详情是此刻的真实状态 ——
+    用快照回填，保存时就会拿旧值覆盖别人刚改的新值。
+
+    路径参数 expense_id 写 `int` 就够了：`/expenses/abc` 由 FastAPI 在进函数前
+    拦成 422（loc = ["path", "expense_id"]），不用手写类型判断。
+    """
+    expense = _get_or_404(db, user_id, expense_id)
     return ExpenseOut.from_model(expense, categories_crud.name_map(db))
