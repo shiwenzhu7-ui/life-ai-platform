@@ -9,6 +9,7 @@
 """
 
 from datetime import date, timedelta
+import re
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
@@ -16,12 +17,18 @@ from sqlalchemy.orm import Session
 from core.db import get_db
 from core.deps import get_current_user_id
 from core.errors import not_found, validation_error
-from core.time import now_utc, to_utc_naive
+from core.time import beijing_month_range, now_beijing, now_utc, to_utc_naive
 from modules.shared.categories import crud as categories_crud
 from modules.shared.pagination import Page
 from modules.lifeweb.expenses import crud
 from modules.lifeweb.expenses.model import Expense
-from modules.lifeweb.expenses.schema import ExpenseCreate, ExpenseOut, ExpenseType, ExpenseUpdate
+from modules.lifeweb.expenses.schema import (
+    ExpenseCreate,
+    ExpenseOut,
+    ExpenseSummary,
+    ExpenseType,
+    ExpenseUpdate,
+)
 
 router = APIRouter(prefix="/expenses", tags=["消费"])
 
@@ -138,6 +145,69 @@ def create_expense(
 
 # 注意：/expenses/summary（第 7 步）是固定路径，必须写在这里 —— 在 /{expense_id} 之前，
 # 否则 "summary" 会被当成 id 解析成 int，直接 422 int_parsing。
+
+# 只接受 "2026-11" 这种两位月份；"2026-1" / "2026-13" / "abc" 一律 422
+_MONTH_PATTERN = re.compile(r"^(?P<year>\d{4})-(?P<month>0[1-9]|1[0-2])$")
+
+
+def _parse_month(month: str | None) -> tuple[str, int, int]:
+    """把 "2026-11" 拆成 ("2026-11", 2026, 11)；不传就取北京时间的当月。
+
+    为什么用正则而不用 strptime("%Y-%m")：strptime 会把 "2026-1" 也吃下来，
+    而接口约定（docs/接口设计.md §5 的 period 示例）是两位月份。
+    校验放在这里而不是 Query(pattern=...)：这样报的是我们的统一错误体，
+    前端只需要处理一种 422 形状。
+    """
+    if month is None:
+        today = now_beijing().date()
+        return f"{today.year:04d}-{today.month:02d}", today.year, today.month
+
+    matched = _MONTH_PATTERN.match(month.strip())
+    if matched is None:
+        raise validation_error("month 格式应为 YYYY-MM")
+
+    year = int(matched.group("year"))
+    mon = int(matched.group("month"))
+    return f"{year:04d}-{mon:02d}", year, mon
+
+
+@router.get("/summary", response_model=ExpenseSummary, summary="月度汇总")
+def get_summary(
+    month: str | None = Query(default=None, description="月份 YYYY-MM，默认当月"),
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> ExpenseSummary:
+    """一个月的收支汇总 —— 首页的消费卡片和消费页顶部的三个数字都用它。
+
+    三块数据的口径：
+      1. 两个总额与 balance：只统计「这个月」+「未删除」的账
+      2. by_category：只统计支出，ratio 的分母是支出总额
+      3. recent_7d：与 month 无关，永远是「今天往前 7 天（含今天）」，缺日补 0.00
+
+    日期边界全部用北京时间的半开区间（见 core/time.py 的 beijing_month_range）：
+    month=2026-11 对应库里 UTC 的 [2026-10-31 16:00, 2026-11-30 16:00)。
+    """
+    period, year, mon = _parse_month(month)
+    month_start, month_end = beijing_month_range(year, mon)
+
+    # 最近 7 天：今天往前数 6 天，连今天共 7 个，升序（今天在最后）
+    today = now_beijing().date()
+    days = [today - timedelta(days=offset) for offset in range(6, -1, -1)]
+
+    data = crud.summarize(
+        db,
+        user_id,
+        month_start_utc=month_start,
+        month_end_utc=month_end,
+        days=days,
+    )
+
+    # 分类名整页查一次（不做 N+1）；crud 不跨模块查 categories 表
+    names = categories_crud.name_map(db)
+    for item in data["by_category"]:
+        item["category_name"] = names.get(item["category_id"])
+
+    return ExpenseSummary(period=period, **data)
 
 
 @router.get("/{expense_id}", response_model=ExpenseOut, summary="一笔的详情")

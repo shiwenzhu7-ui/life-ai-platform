@@ -9,7 +9,8 @@
 对应 docs/页面设计.md §1.4 账单列表的顺序（11-01 在 10-31 之上）。
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
@@ -24,6 +25,17 @@ def _base_query(user_id: int) -> Select:
     return select(Expense).where(
         Expense.user_id == user_id, Expense.deleted_at.is_(None)
     )
+
+
+def _money(value) -> str:
+    """聚合结果 → 字符串金额。
+
+    三件事：
+      `or 0`     SUM() 没有匹配行时返回 None（不是 0），直接 str(None) 会得到 "None"
+      Decimal    金额不能用 float：0.1 + 0.2 != 0.3 在账目上不能接受
+      `:.2f`     "620" 也要输出成 "620.00"，小数位由 DECIMAL(12,2) 语义保证
+    """
+    return f"{Decimal(value or 0):.2f}"
 
 
 def list_for_user(
@@ -176,4 +188,102 @@ def soft_delete(db: Session, expense: Expense) -> None:
     """
     expense.deleted_at = now_utc()
     db.commit()
+
+
+def summarize(
+    db: Session,
+    user_id: int,
+    *,
+    month_start_utc: datetime,
+    month_end_utc: datetime,
+    days: list[date],
+) -> dict:
+    """月度汇总：两个总额 + 分类占比 + 最近 7 天按天合计。
+
+    返回的是**普通字典**（金额已格式化成两位小数的字符串），不是 ORM 对象 ——
+    聚合查询的结果本来就不是某张表的行，套不回 Expense。
+    分类名要查 categories 表，由 router 用 name_map 补上（本层不跨模块查表）。
+
+    三个查询都必须自己带 user_id 与 deleted_at IS NULL：这里没法复用
+    _base_query —— 它返回的是 Expense 实体查询，而这里要的是「按 type 分组」的聚合列。
+    忘了 deleted_at 那一行，用户删掉的账会继续被算进总额。
+    """
+    # 当月的公共条件：区间是半开的，见 core/time.py 的 beijing_month_range
+    month_conds = [
+        Expense.user_id == user_id,
+        Expense.deleted_at.is_(None),
+        Expense.occurred_at >= month_start_utc,
+        Expense.occurred_at < month_end_utc,
+    ]
+
+    # ① 两个总额：一条 SQL 分组拿回来，只有支没有收时 income 那个键不存在
+    totals = dict(
+        db.execute(
+            select(Expense.type, func.sum(Expense.amount))
+            .where(*month_conds)
+            .group_by(Expense.type)
+        ).all()
+    )
+    expense_total = Decimal(totals.get("expense") or 0)
+    income_total = Decimal(totals.get("income") or 0)
+
+    # ② 分类占比：只统计支出。收入没有「品类占比」这回事，
+    #    混进来会让饼图的分母失去意义。
+    category_rows = db.execute(
+        select(
+            Expense.category_id,
+            func.sum(Expense.amount),
+            func.count(),
+        )
+        .where(*month_conds, Expense.type == "expense")
+        .group_by(Expense.category_id)
+        .order_by(func.sum(Expense.amount).desc())
+    ).all()
+
+    by_category = [
+        {
+            "category_id": category_id,
+            "total": _money(total),
+            # 支出为 0 时不能除零，直接给 0.0（此时也不可能有分组行，属双保险）
+            "ratio": (
+                round(float(Decimal(total) / expense_total), 3)
+                if expense_total
+                else 0.0
+            ),
+            "count": int(count),
+        }
+        for category_id, total, count in category_rows
+    ]
+
+    # ③ 最近 7 天：与 month 无关，永远是「今天往前 7 天（含今天）」。
+    #    按北京时间切日 —— 库里存 UTC，凌晨 00:00~08:00 的账若不换算会被算到前一天。
+    #    CONVERT_TZ 用数字偏移 "+08:00"，不用 "Asia/Shanghai"：
+    #    后者要求 MySQL 装了时区表（mysql.time_zone_name），部署时最容易缺的就是它。
+    local_day = func.date(func.convert_tz(Expense.occurred_at, "+00:00", "+08:00"))
+    day_rows = db.execute(
+        select(local_day, func.sum(Expense.amount))
+        .where(
+            Expense.user_id == user_id,
+            Expense.deleted_at.is_(None),
+            Expense.type == "expense",
+            Expense.occurred_at >= beijing_day_start_utc(days[0]),
+            Expense.occurred_at < beijing_day_start_utc(days[-1] + timedelta(days=1)),
+        )
+        .group_by(local_day)
+    ).all()
+    daily = {str(day): _money(total) for day, total in day_rows}
+
+    # 没记账的那天补 "0.00"：前端画折线图不用处理缺日，7 个点永远齐全
+    recent_7d = [
+        {"date": day.isoformat(), "expense": daily.get(day.isoformat(), "0.00")}
+        for day in days
+    ]
+
+    return {
+        "expense_total": _money(expense_total),
+        "income_total": _money(income_total),
+        "balance": _money(income_total - expense_total),
+        "by_category": by_category,
+        "recent_7d": recent_7d,
+    }
 

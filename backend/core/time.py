@@ -58,3 +58,30 @@ def beijing_day_start_utc(day: date) -> datetime:
     用法是半开区间：>= beijing_day_start_utc(day) 且 < beijing_day_start_utc(day + 1)
     """
     return to_utc_naive(datetime.combine(day, time.min, tzinfo=BEIJING))
+
+
+def now_beijing() -> datetime:
+    """当前北京时间（aware）。
+
+    只用来取「今天」「本月」这类日历概念，**不要**拿它去写库 ——
+    入库一律走 now_utc()。分开的理由：一个带时区一个不带，混用会悄悄丢 8 小时。
+    """
+    return datetime.now(BEIJING)
+
+
+def beijing_month_range(year: int, month: int) -> tuple[datetime, datetime]:
+    """北京时间某个月的半开区间 [当月 1 日 00:00, 次月 1 日 00:00) → naive UTC。
+
+    用户说的「11 月」= 北京时间 11-01 00:00 起、12-01 00:00 止（不含），
+    对应库里（存 UTC）是 2026-10-31 16:00 到 2026-11-30 16:00。
+
+    为什么强调半开：区间两端都用 >= / <，不用 BETWEEN ——
+    BETWEEN 两端都含，会把 12-01 00:00 整点那一笔算进 11 月，
+    而它在北京时间已经是 12 月 1 日 08:00 了。
+    """
+    start = to_utc_naive(datetime(year, month, 1, tzinfo=BEIJING))
+    if month == 12:
+        end = to_utc_naive(datetime(year + 1, 1, 1, tzinfo=BEIJING))
+    else:
+        end = to_utc_naive(datetime(year, month + 1, 1, tzinfo=BEIJING))
+    return start, end

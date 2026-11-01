@@ -241,3 +241,47 @@ class ExpenseOut(BaseModel):
             note=expense.note,
             source=expense.source,
         )
+
+
+class CategoryShare(BaseModel):
+    """周汇总里的一行「某分类花了多少」。
+
+    三个刻意的选择：
+      ratio 的分母是**支出总额**（不是收支合计）：它表达「这张饼的哪一块」，
+            只对支出有意义；收入那边没有「占比」这回事。
+      ratio 保留 3 位小数而不是原样输出：前端显示的百分比是 "48.4%"，
+            多出来的位数没有意义，反而会让浮点尾数泄漏到界面上。
+      name 可能为 null：分类被删（物理删）之后历史账仍在，
+            这时让前端显示「未命名」比让整页 500 好。
+    """
+
+    category_id: int
+    category_name: str | None = None
+    total: str
+    ratio: float
+    count: int
+
+
+class DayTotal(BaseModel):
+    """最近 7 天里的某一天：date 是北京时间的日期，expense 是当天支出合计。"""
+
+    date: str
+    expense: str
+
+
+class ExpenseSummary(BaseModel):
+    """月度汇总的响应体 —— 形状见 docs/接口设计.md §5。
+
+    四个金额全是字符串且恒有两位小数（"0.00" 而不是 "0"）：
+    前端直接显示，不参与计算，避免 JS 的浮点在界面上露出来。
+
+    by_category 与 recent_7d 恒为**数组**（没有数据就是 []），不会是 null ——
+    前端可以直接 .map()/.length，不用先判空。
+    """
+
+    period: str
+    expense_total: str
+    income_total: str
+    balance: str
+    by_category: list[CategoryShare]
+    recent_7d: list[DayTotal]
