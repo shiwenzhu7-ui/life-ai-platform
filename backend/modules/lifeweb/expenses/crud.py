@@ -14,8 +14,9 @@ from datetime import date, timedelta
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
-from core.time import beijing_day_start_utc
+from core.time import beijing_day_start_utc, to_utc_naive
 from modules.lifeweb.expenses.model import Expense
+from modules.lifeweb.expenses.schema import ExpenseCreate
 
 
 def _base_query(user_id: int) -> Select:
@@ -96,3 +97,32 @@ def list_for_user(
     )
     items = list(db.scalars(stmt).all())
     return items, int(total)
+
+
+def create(db: Session, user_id: int, payload: ExpenseCreate) -> Expense:
+    """记一笔。
+
+    四个要点：
+      1. user_id 由调用方（router 从登录态）传进来，不读请求体
+      2. source 固定 manual —— 这条路径只承载「用户手记」，
+         V1.1 的 AI 记账走另一条路径写 'ai'，前端无权声明来源
+      3. occurred_at 入库前转成 naive UTC（库里只存 UTC）
+      4. commit 之后的 refresh 不能省：id / created_at / updated_at
+         都是数据库生成的，不 refresh 拿回来是 None，响应里会缺字段
+    """
+    expense = Expense(
+        user_id=user_id,
+        type=payload.type,
+        amount=payload.amount,
+        category_id=payload.category_id,
+        account=payload.account,
+        occurred_at=to_utc_naive(payload.occurred_at),
+        tags=payload.tags,
+        note=payload.note,
+        source="manual",
+    )
+    db.add(expense)
+    db.commit()
+    db.refresh(expense)
+    return expense
+
