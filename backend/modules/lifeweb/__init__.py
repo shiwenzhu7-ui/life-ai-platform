@@ -15,6 +15,7 @@ V1.1：ai      V1.3：documents
 
 from fastapi import APIRouter
 
+from modules.lifeweb.expenses.router import router as expenses_router
 from modules.lifeweb.tasks.router import router as tasks_router
 from modules.shared.categories.router import router as categories_router
 
@@ -27,4 +28,6 @@ router.include_router(categories_router)
 router.include_router(tasks_router)
 
 # ---------- 消费（V1.0） ----------
+router.include_router(expenses_router)
+
 # ---------- 首页（V1.0） ----------
