@@ -16,8 +16,12 @@ V1.1：ai      V1.3：documents
 from fastapi import APIRouter
 
 from modules.lifeweb.tasks.router import router as tasks_router
+from modules.shared.categories.router import router as categories_router
 
 router = APIRouter()
+
+# ---------- 分类字典（shared，待办/消费/购物页共用下拉） ----------
+router.include_router(categories_router)
 
 # ---------- 待办（V1.0） ----------
 router.include_router(tasks_router)

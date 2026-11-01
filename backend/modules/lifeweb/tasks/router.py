@@ -14,6 +14,7 @@ from core.db import get_db
 from core.deps import get_current_user_id
 from core.errors import not_found, validation_error
 from core.time import now_utc
+from modules.shared.categories import crud as categories_crud
 from modules.shared.pagination import Page
 from modules.lifeweb.tasks import crud
 from modules.lifeweb.tasks.schema import (
@@ -40,6 +41,21 @@ def _get_or_404(db: Session, user_id: int, task_id: int):
     return task
 
 
+def _check_category(db: Session, user_id: int, category_id: int) -> None:
+    """校验分类可写进待办：必须存在、scope='task'、属于本人或系统。
+
+    0 是「未分类」的合法值，直接放行 —— 不用去 categories 里找。
+
+    报 422 而不是 404：这是请求体里的字段不合法（前端要提示「分类不存在」），
+    不是「你要访问的资源不在」。
+    """
+    if category_id == 0:
+        return
+    if not categories_crud.exists_visible(db, user_id, category_id, scope="task"):
+        raise validation_error("分类不存在")
+
+
+
 @router.get("", response_model=Page[TaskOut], summary="待办列表")
 def list_tasks(
     page: int = Query(default=1, ge=1, description="页码，从 1 开始"),
@@ -48,6 +64,9 @@ def list_tasks(
         default=None, description="多值：?status=todo&status=doing"
     ),
     priority: Priority | None = Query(default=None, description="low / medium / high"),
+    category_id: int | None = Query(
+        default=None, ge=0, description="分类 ID；0 = 只看未分类"
+    ),
     keyword: str | None = Query(
         default=None, max_length=50, description="模糊匹配标题或备注"
     ),
@@ -76,14 +95,16 @@ def list_tasks(
         size=size,
         status=status,
         priority=priority,
+        category_id=category_id,
         keyword=keyword,
         due_from=due_from,
         due_to=due_to,
         overdue=overdue,
     )
     now = now_utc()  # 同一个请求里只取一次时间，保证整页的 is_overdue 口径一致
+    names = categories_crud.name_map(db)  # 整页共用一张 {id: 名字}，不做 N+1
     return Page.create(
-        [TaskOut.from_model(task, now) for task in items],
+        [TaskOut.from_model(task, now, names) for task in items],
         total,
         page,
         size,
@@ -100,9 +121,11 @@ def create_task(
 
     能走到这里，说明请求体已经过 Pydantic 校验
     （空标题、非法 priority 会在进入本函数之前返回 422）。
+    分类的存在性/用途域归属由 _check_category 校验（也是 422）。
     """
+    _check_category(db, user_id, payload.category_id)
     task = crud.create(db, user_id, payload)
-    return TaskOut.from_model(task, now_utc())
+    return TaskOut.from_model(task, now_utc(), categories_crud.name_map(db))
 
 
 @router.get("/{task_id}", response_model=TaskOut, summary="待办详情")
@@ -116,7 +139,8 @@ def get_task(
     三种查不到的情况（ID 不存在 / 已软删除 / 是别人的）一律返回 404，
     不区分 —— 返回 403 等于告诉对方「这条确实存在，只是不给你看」。
     """
-    return TaskOut.from_model(_get_or_404(db, user_id, task_id), now_utc())
+    task = _get_or_404(db, user_id, task_id)
+    return TaskOut.from_model(task, now_utc(), categories_crud.name_map(db))
 
 
 @router.patch("/{task_id}", response_model=TaskOut, summary="修改待办")
@@ -133,10 +157,13 @@ def update_task(
       title / priority 传 null → 422（数据库里它们是 NOT NULL）
       空白标题           → 422「标题不能为空」
     真正「哪些字段要改」的判断在 crud.update 里，靠 exclude_unset 完成。
+    category_id 只有在请求体里出现过才校验 —— 改标题时不该被分类拦下来。
     """
     task = _get_or_404(db, user_id, task_id)
+    if "category_id" in payload.model_fields_set and payload.category_id is not None:
+        _check_category(db, user_id, payload.category_id)
     task = crud.update(db, task, payload)
-    return TaskOut.from_model(task, now_utc())
+    return TaskOut.from_model(task, now_utc(), categories_crud.name_map(db))
 
 
 @router.patch("/{task_id}/status", response_model=TaskOut, summary="切换待办状态")
@@ -158,7 +185,7 @@ def change_task_status(
     """
     task = _get_or_404(db, user_id, task_id)
     task = crud.change_status(db, task, payload.status)
-    return TaskOut.from_model(task, now_utc())
+    return TaskOut.from_model(task, now_utc(), categories_crud.name_map(db))
 
 
 @router.delete("/{task_id}", status_code=204, summary="删除待办")

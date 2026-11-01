@@ -39,6 +39,9 @@ class TaskCreate(BaseModel):
 
     title: str = Field(min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=2000)
+    # 0 = 未分类。不是 Optional：数据库里是 NOT NULL DEFAULT 0，
+    # 「没有分类」用 0 表达，比 null 少一种状态。
+    category_id: int = Field(default=0, ge=0)
     priority: Priority = "medium"
     due_at: datetime | None = None
 
@@ -61,6 +64,9 @@ class TaskUpdate(BaseModel):
 
     title: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=2000)
+    # 传 0 = 取消分类；传 null 会 422（数据库列 NOT NULL），
+    # 所以它不在 NULLABLE_FIELDS 里 —— 「清空分类」的正确表达是 0，不是 null。
+    category_id: int | None = Field(default=None, ge=0)
     priority: Priority | None = None
     due_at: datetime | None = None
 
@@ -99,6 +105,8 @@ class TaskOut(BaseModel):
     id: int
     title: str
     description: str | None
+    category_id: int = Field(description="0=未分类")
+    category_name: str | None = Field(default=None, description="分类名；未分类时为 null")
     status: str
     priority: str
     due_at: str | None
@@ -107,17 +115,26 @@ class TaskOut(BaseModel):
     is_overdue: bool
 
     @classmethod
-    def from_model(cls, task, now_utc: datetime) -> "TaskOut":
+    def from_model(
+        cls,
+        task,
+        now_utc: datetime,
+        category_names: dict[int, str] | None = None,
+    ) -> "TaskOut":
         """ORM 对象 → 响应体。
 
-        两个转换在这里一次做完：
+        三个转换在这里一次做完：
           naive UTC → 带 +08:00 的 ISO 字符串
           is_overdue 按当前时间现算（不落库）
+          category_id → category_name（由调用方传入的 {id: 名字} 查表得到）
         """
+        names = category_names or {}
         return cls(
             id=task.id,
             title=task.title,
             description=task.description,
+            category_id=task.category_id,
+            category_name=names.get(task.category_id),
             status=task.status,
             priority=task.priority,
             due_at=to_beijing_iso(task.due_at),

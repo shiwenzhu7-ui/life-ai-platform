@@ -1,12 +1,13 @@
 """tasks 表（待办）。
 
-字段与数据库**逐列一致**（就是这 10 列，没有 updated_at / category_id / remind_at）。
-以后要加分类、提醒时间，走 Alembic 迁移加列，不在这里预留。
+字段与数据库**逐列一致**（11 列：10 列 + 后加的 category_id）。
+以后要加 remind_at、source 等列，走 Alembic 迁移加列，不在这里预留。
 """
 
 from datetime import datetime
 
 from sqlalchemy import BigInteger, DateTime, Enum, String, Text, func
+from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db import Base
@@ -26,6 +27,15 @@ class Task(Base):
 
     title: Mapped[str] = mapped_column(String(120), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # 关联 categories.id（scope='task'）；0 = 未分类。
+    # 故意不加外键：分类是字典表，改名/合并分类不该阻塞业务写入，存在性由应用层校验。
+    category_id: Mapped[int] = mapped_column(
+        mysql.SMALLINT(unsigned=True),
+        nullable=False,
+        server_default="0",
+        comment="关联 categories.id，0=未分类",
+    )
 
     status: Mapped[str] = mapped_column(
         Enum(*TASK_STATUSES, name="task_status"),

@@ -32,6 +32,7 @@ def list_for_user(
     size: int = 20,
     status: list[str] | None = None,
     priority: str | None = None,
+    category_id: int | None = None,
     keyword: str | None = None,
     due_from: date | None = None,
     due_to: date | None = None,
@@ -55,6 +56,10 @@ def list_for_user(
 
     if priority:
         conds.append(Task.priority == priority)
+
+    # 注意不能写 if category_id: —— 传 0 是「只看未分类」，是个有效筛选
+    if category_id is not None:
+        conds.append(Task.category_id == category_id)
 
     if keyword and keyword.strip():
         # 用户输入永远不能直接拼进 LIKE：% 和 _ 是通配符。
@@ -121,6 +126,7 @@ def create(db: Session, user_id: int, payload: TaskCreate) -> Task:
         user_id=user_id,
         title=payload.title,
         description=payload.description,
+        category_id=payload.category_id,
         priority=payload.priority,
         status="todo",
         due_at=to_utc_naive(payload.due_at),
