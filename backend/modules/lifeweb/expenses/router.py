@@ -190,3 +190,23 @@ def update_expense(
 
     expense = crud.update(db, expense, payload)
     return ExpenseOut.from_model(expense, categories_crud.name_map(db))
+
+
+@router.delete("/{expense_id}", status_code=204, summary="删一笔")
+def delete_expense(
+    expense_id: int,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> None:
+    """软删除一笔账。
+
+    两个 204 必须同时满足的细节（少一个，运行到请求时才报
+    "Status code 204 must not have a body"）：
+      1. 装饰器里写 status_code=204
+      2. **不写 response_model**，且返回类型标注 None、真的不 return 任何东西
+
+    第二次删同一条会自然 404：_get_or_404 走 crud.get_for_user，
+    而它的查询基座自带 deleted_at IS NULL —— 第一次删完就查不到了。
+    """
+    expense = _get_or_404(db, user_id, expense_id)
+    crud.soft_delete(db, expense)

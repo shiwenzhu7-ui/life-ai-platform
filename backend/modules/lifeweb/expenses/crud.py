@@ -14,7 +14,7 @@ from datetime import date, timedelta
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
-from core.time import beijing_day_start_utc, to_utc_naive
+from core.time import beijing_day_start_utc, now_utc, to_utc_naive
 from modules.lifeweb.expenses.model import Expense
 from modules.lifeweb.expenses.schema import ExpenseCreate, ExpenseUpdate
 
@@ -160,4 +160,20 @@ def update(db: Session, expense: Expense, payload: ExpenseUpdate) -> Expense:
     db.commit()
     db.refresh(expense)
     return expense
+
+
+def soft_delete(db: Session, expense: Expense) -> None:
+    """软删除：只把 deleted_at 打上时间戳，那一行仍留在表里。
+
+    只写一列，不碰 amount / type / 其它字段 —— 用户点「删除」的意思是
+    「这条不该再出现」，不是「把金额改成 0」。
+
+    故意不 refresh：调用方（DELETE 接口）返回 204 无响应体，
+    没有人读这个对象的新状态，多一次 SELECT 是白花。
+
+    为什么不用物理删：删错了无法恢复；也统计不出「这个月删了几条」。
+    代价是表会慢慢变大 —— 以后加一个「deleted_at 超过 90 天就物理删」的清理任务。
+    """
+    expense.deleted_at = now_utc()
+    db.commit()
 
