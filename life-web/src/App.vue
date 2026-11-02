@@ -6,6 +6,12 @@
 
 <style lang="scss">
 // 全局样式在 styles/ 里，F2 再建；这里先只留最小重置。
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
 html,
 body {
   margin: 0;
