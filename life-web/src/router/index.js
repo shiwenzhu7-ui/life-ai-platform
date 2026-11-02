@@ -1,22 +1,33 @@
 import Vue from 'vue'
 import VueRouter from 'vue-router'
-import HomeView from '../views/HomeView.vue'
 
 Vue.use(VueRouter)
 
+// V1.0 只有三条业务路由 + 404，其余页面等对应版本再加。
 const routes = [
   {
     path: '/',
-    name: 'home',
-    component: HomeView
+    name: 'dashboard',
+    component: () => import('../views/dashboard/index.vue'),
+    meta: { title: '首页' }
   },
   {
-    path: '/about',
-    name: 'about',
-    // route level code-splitting
-    // this generates a separate chunk (about.[hash].js) for this route
-    // which is lazy-loaded when the route is visited.
-    component: () => import(/* webpackChunkName: "about" */ '../views/AboutView.vue')
+    path: '/tasks',
+    name: 'tasks',
+    component: () => import('../views/tasks/index.vue'),
+    meta: { title: '待办' }
+  },
+  {
+    path: '/expenses',
+    name: 'expenses',
+    component: () => import('../views/expenses/index.vue'),
+    meta: { title: '消费' }
+  },
+  {
+    path: '*',
+    name: 'not-found',
+    component: () => import('../views/NotFound.vue'),
+    meta: { title: '页面不存在' }
   }
 ]
 
