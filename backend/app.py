@@ -10,8 +10,8 @@
 """
 
 from fastapi import FastAPI
-from sqlalchemy import text
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 import modules.registry  # noqa: F401 —— 导入即注册全部表，别删
 from core.config import settings
@@ -38,9 +38,9 @@ register_exception_handlers(app)
 # ---------- 三端路由 ----------
 # 每一端的 router 在它自己的 __init__.py 里汇总本端所有模块，
 # 所以这里永远只有三行，加新模块不用动这个文件。
-app.include_router(lifeweb_router, prefix=settings.api_v1_prefix)       # 生活管理端
+app.include_router(lifeweb_router, prefix=settings.api_v1_prefix)  # 生活管理端
 app.include_router(analyticsweb_router, prefix=settings.api_v1_prefix)  # 数据分析端
-app.include_router(adminweb_router, prefix=settings.api_v1_prefix)      # 系统管理后台
+app.include_router(adminweb_router, prefix=settings.api_v1_prefix)  # 系统管理后台
 
 
 # ---------- 运维探针（不带 /api/v1 前缀） ----------

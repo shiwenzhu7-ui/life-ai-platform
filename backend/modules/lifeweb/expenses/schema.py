@@ -60,7 +60,6 @@ def _clean_note(value: str | None) -> str | None:
     return text or None
 
 
-
 class ExpenseCreate(BaseModel):
     """记一笔的请求体 —— 只放「前端能决定的东西」。
 
@@ -93,9 +92,7 @@ class ExpenseCreate(BaseModel):
 
     occurred_at: datetime = Field(description="发生时间；不带时区按北京时间解释")
 
-    tags: list[Tag] | None = Field(
-        default=None, max_length=10, description="最多 10 个标签"
-    )
+    tags: list[Tag] | None = Field(default=None, max_length=10, description="最多 10 个标签")
 
     note: str | None = Field(default=None, max_length=255, description="备注")
 
@@ -151,11 +148,17 @@ class ExpenseUpdate(BaseModel):
 
     category_id: int | None = Field(default=None, ge=1, description="分类 ID，域须与 type 匹配")
 
-    account: str | None = Field(default=None, max_length=32, description="现金 / 微信 / 支付宝 / 银行卡")
+    account: str | None = Field(
+        default=None, max_length=32, description="现金 / 微信 / 支付宝 / 银行卡"
+    )
 
-    occurred_at: datetime | None = Field(default=None, description="发生时间；不带时区按北京时间解释")
+    occurred_at: datetime | None = Field(
+        default=None, description="发生时间；不带时区按北京时间解释"
+    )
 
-    tags: list[Tag] | None = Field(default=None, max_length=10, description="最多 10 个标签；null 清空")
+    tags: list[Tag] | None = Field(
+        default=None, max_length=10, description="最多 10 个标签；null 清空"
+    )
 
     note: str | None = Field(default=None, max_length=255, description="备注；null 清空")
 
@@ -219,9 +222,7 @@ class ExpenseOut(BaseModel):
     source: str
 
     @classmethod
-    def from_model(
-        cls, expense, category_names: dict[int, str] | None = None
-    ) -> "ExpenseOut":
+    def from_model(cls, expense, category_names: dict[int, str] | None = None) -> "ExpenseOut":
         """ORM 对象 → 响应模型。
 
         category_names 是整页共用的一张 {id: 名字}（见 categories.crud.name_map），

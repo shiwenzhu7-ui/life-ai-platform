@@ -37,9 +37,7 @@ def list_visible(db: Session, user_id: int, *, scope: str | None = None) -> list
     return list(db.scalars(stmt).all())
 
 
-def exists_visible(
-    db: Session, user_id: int, category_id: int, *, scope: str
-) -> bool:
+def exists_visible(db: Session, user_id: int, category_id: int, *, scope: str) -> bool:
     """这个分类存在、属于本人或系统、且确实用在 scope 这个域里吗？
 
     三条件缺一不可：

@@ -18,9 +18,7 @@ router = APIRouter(prefix="/categories", tags=["分类"])
 
 @router.get("", response_model=list[CategoryOut], summary="分类列表（系统 + 本人自建）")
 def list_categories(
-    scope: CategoryScope | None = Query(
-        default=None, description="用途域；不传则返回全部用途域"
-    ),
+    scope: CategoryScope | None = Query(default=None, description="用途域；不传则返回全部用途域"),
     db: Session = Depends(get_db),
     user_id: int = Depends(get_current_user_id),
 ) -> list[CategoryOut]:

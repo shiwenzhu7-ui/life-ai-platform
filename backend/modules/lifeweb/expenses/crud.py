@@ -23,9 +23,7 @@ from modules.shared.money import money
 
 def _base_query(user_id: int) -> Select:
     """所有查询的公共起点：限本人 + 未删除。"""
-    return select(Expense).where(
-        Expense.user_id == user_id, Expense.deleted_at.is_(None)
-    )
+    return select(Expense).where(Expense.user_id == user_id, Expense.deleted_at.is_(None))
 
 
 def list_for_user(
@@ -68,12 +66,7 @@ def list_for_user(
     if keyword and keyword.strip():
         # 用户输入永远不能直接拼进 LIKE：% 和 _ 是通配符。
         # 顺序不能反 —— 必须先把 \ 换成 \\，否则后面加进去的转义符会被再转义一次。
-        raw = (
-            keyword.strip()
-            .replace("\\", "\\\\")
-            .replace("%", "\\%")
-            .replace("_", "\\_")
-        )
+        raw = keyword.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         conds.append(Expense.note.like(f"%{raw}%", escape="\\"))
 
     if date_from:
@@ -82,9 +75,7 @@ def list_for_user(
 
     if date_to:
         # 半开区间：包含当天 = < 次日 00:00（北京时间）
-        conds.append(
-            Expense.occurred_at < beijing_day_start_utc(date_to + timedelta(days=1))
-        )
+        conds.append(Expense.occurred_at < beijing_day_start_utc(date_to + timedelta(days=1)))
 
     base = _base_query(user_id)
     if conds:
@@ -216,8 +207,7 @@ def daily_totals(db: Session, user_id: int, days: list[date]) -> list[dict]:
 
     # 没记账的那天补 "0.00"：前端画图不用处理缺日，点数永远齐全
     return [
-        {"date": day.isoformat(), "expense": daily.get(day.isoformat(), "0.00")}
-        for day in days
+        {"date": day.isoformat(), "expense": daily.get(day.isoformat(), "0.00")} for day in days
     ]
 
 
@@ -276,11 +266,7 @@ def summarize(
             "category_id": category_id,
             "total": money(total),
             # 支出为 0 时不能除零，直接给 0.0（此时也不可能有分组行，属双保险）
-            "ratio": (
-                round(float(Decimal(total) / expense_total), 3)
-                if expense_total
-                else 0.0
-            ),
+            "ratio": (round(float(Decimal(total) / expense_total), 3) if expense_total else 0.0),
             "count": int(count),
         }
         for category_id, total, count in category_rows
@@ -298,4 +284,3 @@ def summarize(
         "by_category": by_category,
         "recent_7d": recent_7d,
     }
-

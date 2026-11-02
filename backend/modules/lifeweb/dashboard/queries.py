@@ -120,9 +120,7 @@ def _task_counts(
     return counts
 
 
-def _expense_total(
-    db: Session, user_id: int, *, start_utc: datetime, end_utc: datetime
-) -> str:
+def _expense_total(db: Session, user_id: int, *, start_utc: datetime, end_utc: datetime) -> str:
     """某个区间内的支出合计（只算 expense，不算 income）。
 
     区间用半开 [start, end)：BETWEEN 两端都含，会把区间末尾整点那一笔算进来。
@@ -170,9 +168,7 @@ def _focus_tasks(
     return list(rows)
 
 
-def overview(
-    db: Session, user_id: int, *, now_bj: datetime | None = None
-) -> DashboardOverview:
+def overview(db: Session, user_id: int, *, now_bj: datetime | None = None) -> DashboardOverview:
     """首页全部数据，一次调用取齐。
 
     `now_bj` 由调用方传（router），这里不自己取当前时间：

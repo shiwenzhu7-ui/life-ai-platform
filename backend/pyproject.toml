@@ -5,9 +5,11 @@ exclude = [".venv", "alembic/versions", "__pycache__"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM"]
+# B008: FastAPI 的 Depends()/Query() 规定必须写在参数默认值里，这条规则对它恒为误报
+extend-ignore = ["B008"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["app"]
+known-first-party = ["core", "modules"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

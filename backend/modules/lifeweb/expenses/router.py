@@ -8,8 +8,8 @@
 必须写在 `/{expense_id}` 之前，否则会被当成 id 解析、报 422 int_parsing。
 """
 
-from datetime import date, timedelta
 import re
+from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
@@ -18,8 +18,6 @@ from core.db import get_db
 from core.deps import get_current_user_id
 from core.errors import not_found, validation_error
 from core.time import beijing_month_range, now_beijing, now_utc, to_utc_naive
-from modules.shared.categories import crud as categories_crud
-from modules.shared.pagination import Page
 from modules.lifeweb.expenses import crud
 from modules.lifeweb.expenses.model import Expense
 from modules.lifeweb.expenses.schema import (
@@ -29,6 +27,8 @@ from modules.lifeweb.expenses.schema import (
     ExpenseType,
     ExpenseUpdate,
 )
+from modules.shared.categories import crud as categories_crud
+from modules.shared.pagination import Page
 
 router = APIRouter(prefix="/expenses", tags=["消费"])
 
@@ -62,7 +62,6 @@ def _check_occurred_at(occurred_at) -> None:
         raise validation_error(f"发生时间不能晚于当前时间 {FUTURE_DAYS} 天")
 
 
-
 def _get_or_404(db: Session, user_id: int, expense_id: int) -> Expense:
     """取一笔账，取不到就 404 —— 详情 / 修改 / 删除三个接口共用这一个入口。
 
@@ -75,7 +74,6 @@ def _get_or_404(db: Session, user_id: int, expense_id: int) -> Expense:
     return expense
 
 
-
 @router.get("", response_model=Page[ExpenseOut], summary="消费列表")
 def list_expenses(
     page: int = Query(default=1, ge=1, description="页码，从 1 开始"),
@@ -83,12 +81,8 @@ def list_expenses(
     type: ExpenseType | None = Query(default=None, description="expense / income"),
     category_id: int | None = Query(default=None, ge=1, description="分类 ID"),
     keyword: str | None = Query(default=None, max_length=50, description="模糊匹配备注"),
-    date_from: date | None = Query(
-        default=None, description="发生日期起（含当天），YYYY-MM-DD"
-    ),
-    date_to: date | None = Query(
-        default=None, description="发生日期止（含当天），YYYY-MM-DD"
-    ),
+    date_from: date | None = Query(default=None, description="发生日期起（含当天），YYYY-MM-DD"),
+    date_to: date | None = Query(default=None, description="发生日期止（含当天），YYYY-MM-DD"),
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ) -> Page[ExpenseOut]:
@@ -253,9 +247,7 @@ def update_expense(
 
     if changed & {"type", "category_id"}:
         final_type = payload.type if "type" in changed else expense.type
-        final_category = (
-            payload.category_id if "category_id" in changed else expense.category_id
-        )
+        final_category = payload.category_id if "category_id" in changed else expense.category_id
         _check_category(db, user_id, final_category, scope=final_type)
 
     expense = crud.update(db, expense, payload)

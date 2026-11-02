@@ -45,8 +45,12 @@ milvus/
 volumes/
 
 # ---------- IDE / 系统 ----------
-.vscode/
+# 注意：这里必须写 `.vscode/*` 而不是 `.vscode/`。
+# 目录被整体排除后，git 不允许再用 ! 把里面的文件捞回来（"It is not possible
+# to re-include a file if a parent directory of that file is excluded."）。
+.vscode/*
 !.vscode/extensions.json
+!.vscode/settings.json
 .idea/
 *.swp
 .DS_Store

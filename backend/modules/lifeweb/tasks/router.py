@@ -1,8 +1,8 @@
 """待办接口 —— 只做三件事，不含业务规则。
 
-  1. 绑定并校验 HTTP 参数（Query / Body）
-  2. 注入 user_id（V1.0 固定演示用户；V1.2 换成 JWT 解析，本层不用改）
-  3. 调 crud，把 ORM 对象转成响应 Schema
+1. 绑定并校验 HTTP 参数（Query / Body）
+2. 注入 user_id（V1.0 固定演示用户；V1.2 换成 JWT 解析，本层不用改）
+3. 调 crud，把 ORM 对象转成响应 Schema
 """
 
 from datetime import date
@@ -14,8 +14,6 @@ from core.db import get_db
 from core.deps import get_current_user_id
 from core.errors import not_found, validation_error
 from core.time import now_utc
-from modules.shared.categories import crud as categories_crud
-from modules.shared.pagination import Page
 from modules.lifeweb.tasks import crud
 from modules.lifeweb.tasks.schema import (
     Priority,
@@ -25,6 +23,8 @@ from modules.lifeweb.tasks.schema import (
     TaskStatusUpdate,
     TaskUpdate,
 )
+from modules.shared.categories import crud as categories_crud
+from modules.shared.pagination import Page
 
 router = APIRouter(prefix="/tasks", tags=["待办"])
 
@@ -55,7 +55,6 @@ def _check_category(db: Session, user_id: int, category_id: int) -> None:
         raise validation_error("分类不存在")
 
 
-
 @router.get("", response_model=Page[TaskOut], summary="待办列表")
 def list_tasks(
     page: int = Query(default=1, ge=1, description="页码，从 1 开始"),
@@ -64,18 +63,10 @@ def list_tasks(
         default=None, description="多值：?status=todo&status=doing"
     ),
     priority: Priority | None = Query(default=None, description="low / medium / high"),
-    category_id: int | None = Query(
-        default=None, ge=0, description="分类 ID；0 = 只看未分类"
-    ),
-    keyword: str | None = Query(
-        default=None, max_length=50, description="模糊匹配标题或备注"
-    ),
-    due_from: date | None = Query(
-        default=None, description="截止日期起（含当天），YYYY-MM-DD"
-    ),
-    due_to: date | None = Query(
-        default=None, description="截止日期止（含当天），YYYY-MM-DD"
-    ),
+    category_id: int | None = Query(default=None, ge=0, description="分类 ID；0 = 只看未分类"),
+    keyword: str | None = Query(default=None, max_length=50, description="模糊匹配标题或备注"),
+    due_from: date | None = Query(default=None, description="截止日期起（含当天），YYYY-MM-DD"),
+    due_to: date | None = Query(default=None, description="截止日期止（含当天），YYYY-MM-DD"),
     overdue: bool = Query(default=False, description="true 只看逾期"),
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),

@@ -11,8 +11,9 @@ import sys
 from logging.config import fileConfig
 from pathlib import Path
 
-from alembic import context
 from sqlalchemy import engine_from_config, pool
+
+from alembic import context
 
 # 让 alembic 进程能够 import backend/ 下的 core、modules
 BACKEND_DIR = Path(__file__).resolve().parents[1]

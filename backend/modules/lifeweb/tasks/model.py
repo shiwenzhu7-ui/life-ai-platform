@@ -64,9 +64,7 @@ class Task(Base):
         注意：这是**计算属性**，不落库 —— 落库的话第二天就过期了。
         """
         return (
-            self.due_at is not None
-            and self.due_at < now_utc
-            and self.status in ("todo", "doing")
+            self.due_at is not None and self.due_at < now_utc and self.status in ("todo", "doing")
         )
 
     def __repr__(self) -> str:  # pragma: no cover

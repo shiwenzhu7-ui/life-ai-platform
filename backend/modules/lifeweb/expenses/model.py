@@ -66,9 +66,7 @@ class Expense(Base):
     )
 
     # 现金 / 微信 / 支付宝 / 银行卡
-    account: Mapped[str] = mapped_column(
-        String(32), nullable=False, server_default="现金"
-    )
+    account: Mapped[str] = mapped_column(String(32), nullable=False, server_default="现金")
 
     # 发生时间（什么时候花的钱），不是录入时间；统计一律按它分组。存 UTC
     occurred_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
