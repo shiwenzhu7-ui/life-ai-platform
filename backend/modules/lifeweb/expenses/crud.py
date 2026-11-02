@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from core.time import beijing_day_start_utc, now_utc, to_utc_naive
 from modules.lifeweb.expenses.model import Expense
 from modules.lifeweb.expenses.schema import ExpenseCreate, ExpenseUpdate
+from modules.shared.money import money
 
 
 def _base_query(user_id: int) -> Select:
@@ -25,17 +26,6 @@ def _base_query(user_id: int) -> Select:
     return select(Expense).where(
         Expense.user_id == user_id, Expense.deleted_at.is_(None)
     )
-
-
-def _money(value) -> str:
-    """聚合结果 → 字符串金额。
-
-    三件事：
-      `or 0`     SUM() 没有匹配行时返回 None（不是 0），直接 str(None) 会得到 "None"
-      Decimal    金额不能用 float：0.1 + 0.2 != 0.3 在账目上不能接受
-      `:.2f`     "620" 也要输出成 "620.00"，小数位由 DECIMAL(12,2) 语义保证
-    """
-    return f"{Decimal(value or 0):.2f}"
 
 
 def list_for_user(
@@ -190,6 +180,47 @@ def soft_delete(db: Session, expense: Expense) -> None:
     db.commit()
 
 
+def daily_totals(db: Session, user_id: int, days: list[date]) -> list[dict]:
+    """若干天的每日支出合计，缺的日期补 "0.00"，返回顺序与 days 一致。
+
+    两个消费者，要求完全一样，所以只有这**一份**实现：
+      `GET /expenses/summary` 的 recent_7d
+      `GET /dashboard/overview` 的 recent_7d（首页迷你柱状图）
+
+    抽出来的收益不是少几行，而是**口径只有一处**：只算支出、只算未删、
+    按北京日期切日、缺的补零。任何一条各写一遍都会慢慢分叉。
+
+    days 必须是**升序且连续**的日期（调用方负责）：这里只取两头
+    [days[0] 00:00, days[-1]+1 00:00) 做半开区间，中间的空洞靠 Python 补零，
+    不必生成完整的日期序列参数。
+    """
+    if not days:
+        return []
+
+    # CONVERT_TZ 用数字偏移 "+08:00"，不用 "Asia/Shanghai"：
+    # 后者要求 MySQL 装了时区表（mysql.time_zone_name），部署时最容易缺的就是它。
+    local_day = func.date(func.convert_tz(Expense.occurred_at, "+00:00", "+08:00"))
+    rows = db.execute(
+        select(local_day, func.sum(Expense.amount))
+        .where(
+            Expense.user_id == user_id,
+            Expense.deleted_at.is_(None),
+            Expense.type == "expense",
+            Expense.occurred_at >= beijing_day_start_utc(days[0]),
+            Expense.occurred_at < beijing_day_start_utc(days[-1] + timedelta(days=1)),
+        )
+        .group_by(local_day)
+    ).all()
+
+    daily = {str(day): money(total) for day, total in rows}
+
+    # 没记账的那天补 "0.00"：前端画图不用处理缺日，点数永远齐全
+    return [
+        {"date": day.isoformat(), "expense": daily.get(day.isoformat(), "0.00")}
+        for day in days
+    ]
+
+
 def summarize(
     db: Session,
     user_id: int,
@@ -243,7 +274,7 @@ def summarize(
     by_category = [
         {
             "category_id": category_id,
-            "total": _money(total),
+            "total": money(total),
             # 支出为 0 时不能除零，直接给 0.0（此时也不可能有分组行，属双保险）
             "ratio": (
                 round(float(Decimal(total) / expense_total), 3)
@@ -256,33 +287,14 @@ def summarize(
     ]
 
     # ③ 最近 7 天：与 month 无关，永远是「今天往前 7 天（含今天）」。
-    #    按北京时间切日 —— 库里存 UTC，凌晨 00:00~08:00 的账若不换算会被算到前一天。
-    #    CONVERT_TZ 用数字偏移 "+08:00"，不用 "Asia/Shanghai"：
-    #    后者要求 MySQL 装了时区表（mysql.time_zone_name），部署时最容易缺的就是它。
-    local_day = func.date(func.convert_tz(Expense.occurred_at, "+00:00", "+08:00"))
-    day_rows = db.execute(
-        select(local_day, func.sum(Expense.amount))
-        .where(
-            Expense.user_id == user_id,
-            Expense.deleted_at.is_(None),
-            Expense.type == "expense",
-            Expense.occurred_at >= beijing_day_start_utc(days[0]),
-            Expense.occurred_at < beijing_day_start_utc(days[-1] + timedelta(days=1)),
-        )
-        .group_by(local_day)
-    ).all()
-    daily = {str(day): _money(total) for day, total in day_rows}
-
-    # 没记账的那天补 "0.00"：前端画折线图不用处理缺日，7 个点永远齐全
-    recent_7d = [
-        {"date": day.isoformat(), "expense": daily.get(day.isoformat(), "0.00")}
-        for day in days
-    ]
+    #    具体实现已抽到 daily_totals()：首页的迷你柱状图要的是同一份数据，
+    #    两处共用一条 SQL，才不会出现「消费页补零、首页不补零」这种偏差。
+    recent_7d = daily_totals(db, user_id, days)
 
     return {
-        "expense_total": _money(expense_total),
-        "income_total": _money(income_total),
-        "balance": _money(income_total - expense_total),
+        "expense_total": money(expense_total),
+        "income_total": money(income_total),
+        "balance": money(income_total - expense_total),
         "by_category": by_category,
         "recent_7d": recent_7d,
     }

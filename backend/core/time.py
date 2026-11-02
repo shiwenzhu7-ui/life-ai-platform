@@ -69,6 +69,25 @@ def now_beijing() -> datetime:
     return datetime.now(BEIJING)
 
 
+def shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
+    """月份加减 —— 纯算术，不碰 date/datetime，也不引入 dateutil。
+
+    为什么要它：首页要算「上月支出」，而 1 月的上个月是去年 12 月。
+    `month - 1` 在 1 月会得到 0，必须进位到年份；写错就是「上月永远是 0 元」。
+
+    为什么自己算而不用 relativedelta：只关心「年 + 月」两个整数，
+    引入第三方库不值当；而且 relativedelta 面对「1 月 31 日减一个月」有一套
+    自己的取舍规则，我们根本用不到，记错了反而会误判。
+
+    示例：
+        shift_month(2026,  1, -1) -> (2025, 12)
+        shift_month(2026, 12,  1) -> (2027,  1)
+        shift_month(2026,  3, -15) -> (2024, 12)
+    """
+    total = year * 12 + (month - 1) + delta
+    return total // 12, total % 12 + 1
+
+
 def beijing_month_range(year: int, month: int) -> tuple[datetime, datetime]:
     """北京时间某个月的半开区间 [当月 1 日 00:00, 次月 1 日 00:00) → naive UTC。
 
@@ -80,8 +99,6 @@ def beijing_month_range(year: int, month: int) -> tuple[datetime, datetime]:
     而它在北京时间已经是 12 月 1 日 08:00 了。
     """
     start = to_utc_naive(datetime(year, month, 1, tzinfo=BEIJING))
-    if month == 12:
-        end = to_utc_naive(datetime(year + 1, 1, 1, tzinfo=BEIJING))
-    else:
-        end = to_utc_naive(datetime(year, month + 1, 1, tzinfo=BEIJING))
+    next_year, next_month = shift_month(year, month, 1)
+    end = to_utc_naive(datetime(next_year, next_month, 1, tzinfo=BEIJING))
     return start, end
