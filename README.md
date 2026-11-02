@@ -238,7 +238,7 @@ operation_logs       操作日志
 life-ai-platform/
 ├── backend/                 FastAPI 后端
 │   └── app/
-├── frontend/                生活管理端
+├── life-web/                生活管理端
 ├── analytics-web/           数据分析端
 ├── admin-web/               系统管理后台
 ├── keycloak/                Realm 和 Client 配置
