@@ -2,11 +2,9 @@
   <div class="tasks">
     <div class="tasks__toolbar">
       <span class="tasks__hint">共 {{ total }} 条待办</span>
-      <el-tooltip content="新建、编辑、删除在 F5 实现" placement="top-end">
-        <el-button type="primary" size="small" icon="el-icon-plus" disabled>
-          新建待办
-        </el-button>
-      </el-tooltip>
+      <el-button type="primary" size="small" icon="el-icon-plus" @click="openCreate">
+        新建待办
+      </el-button>
     </div>
 
     <!-- 筛选条：五个维度照 docs/页面设计.md §1.4 的接口映射表，后端参数早已就绪 -->
@@ -95,6 +93,17 @@
       empty-text="还没有待办"
       style="width: 100%"
     >
+      <el-table-column width="46" align="center">
+        <!-- 勾选 = 完成。只做 todo ↔ done 二元切换；doing/cancelled 在 V1.0 没有界面入口 -->
+        <template slot-scope="{ row }">
+          <el-checkbox
+            :value="row.status === 'done'"
+            :disabled="togglingId === row.id"
+            @change="toggleDone(row)"
+          />
+        </template>
+      </el-table-column>
+
       <el-table-column label="标题" min-width="240" show-overflow-tooltip>
         <template slot-scope="{ row }">
           <span :class="{ 'is-done': row.status === 'done' }">{{ row.title }}</span>
@@ -135,8 +144,8 @@
 
       <el-table-column label="操作" width="130" align="center">
         <template slot-scope="{ row }">
-          <el-button type="text" size="mini" @click="notYet('编辑', row)">编辑</el-button>
-          <el-button type="text" size="mini" class="tasks__danger" @click="notYet('删除', row)">
+          <el-button type="text" size="mini" @click="openEdit(row)">编辑</el-button>
+          <el-button type="text" size="mini" class="tasks__danger" @click="remove(row)">
             删除
           </el-button>
         </template>
@@ -144,13 +153,21 @@
     </el-table>
 
     <PaginationBar :page="page" :size="size" :total="total" @change="handlePageChange" />
+
+    <TaskFormDrawer
+      :visible.sync="drawerVisible"
+      :task-id="editingId"
+      @saved="onSaved"
+      @failed="fetchData"
+    />
   </div>
 </template>
 
 <script>
-import { listTasks } from '@/api/tasks'
+import { listTasks, changeTaskStatus, deleteTask } from '@/api/tasks'
 import { formatDateTime } from '@/utils/format'
 import PaginationBar from '@/components/PaginationBar.vue'
+import TaskFormDrawer from '@/components/TaskFormDrawer.vue'
 
 // 状态/优先级的「英文值 → 中文 + 颜色」映射放在组件外：
 // 它们是常量，放进 data 会被 Vue 做成响应式，白白多一层开销。
@@ -178,7 +195,7 @@ const emptyFilters = () => ({
 
 export default {
   name: 'TasksView',
-  components: { PaginationBar },
+  components: { PaginationBar, TaskFormDrawer },
   data() {
     return {
       loading: false,
@@ -187,6 +204,11 @@ export default {
       page: 1,
       size: 20,
       filters: emptyFilters(),
+      // 抽屉：visible 控制显示，editingId 为空 = 新建
+      drawerVisible: false,
+      editingId: null,
+      // 正在切状态的那一行的 id，用来禁掉重复点击
+      togglingId: null,
       statusOptions: Object.keys(STATUS_MAP).map((value) => ({
         value,
         label: STATUS_MAP[value].label
@@ -271,8 +293,55 @@ export default {
       this.fetchData()
     },
 
-    notYet(action, row) {
-      this.$message.info(`${action}「${row.title}」在 F5 实现`)
+    // 勾选 = 完成 / 取消完成
+    async toggleDone(row) {
+      const next = row.status === 'done' ? 'todo' : 'done'
+      this.togglingId = row.id
+      try {
+        await changeTaskStatus(row.id, next)
+        // 必须重拉：completed_at、is_overdue、排序都可能变，本地改行会和服务端不一致
+        await this.fetchData()
+      } catch (e) {
+        // 提示已由拦截器弹过；重拉一次让界面回到服务端的真实状态
+        await this.fetchData()
+      } finally {
+        this.togglingId = null
+      }
+    },
+
+    async remove(row) {
+      try {
+        await this.$confirm(`删除后不可恢复，确定删除「${row.title}」？`, '删除待办', {
+          type: 'warning',
+          confirmButtonText: '删除',
+          cancelButtonText: '取消'
+        })
+      } catch (e) {
+        return // 用户点了取消
+      }
+      try {
+        await deleteTask(row.id)
+        // 删掉的是当前页最后一条时，页码要退一位，否则会停在空页
+        if (this.rows.length === 1 && this.page > 1) this.page -= 1
+        this.$message.success('已删除')
+        await this.fetchData()
+      } catch (e) {
+        await this.fetchData()
+      }
+    },
+
+    openCreate() {
+      this.editingId = null
+      this.drawerVisible = true
+    },
+
+    openEdit(row) {
+      this.editingId = row.id
+      this.drawerVisible = true
+    },
+
+    onSaved() {
+      this.fetchData()
     }
   }
 }
