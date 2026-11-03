@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="tasks">
     <div class="tasks__toolbar">
       <span class="tasks__hint">共 {{ total }} 条待办</span>
@@ -7,6 +7,83 @@
           新建待办
         </el-button>
       </el-tooltip>
+    </div>
+
+    <!-- 筛选条：五个维度照 docs/页面设计.md §1.4 的接口映射表，后端参数早已就绪 -->
+    <div class="tasks__filters">
+      <el-input
+        v-model="filters.keyword"
+        class="tasks__filter"
+        placeholder="搜索标题或备注"
+        prefix-icon="el-icon-search"
+        clearable
+        @keyup.enter.native="handleFilterChange"
+        @clear="handleFilterChange"
+      />
+      <el-button size="small" @click="handleFilterChange">搜索</el-button>
+
+      <el-select
+        v-model="filters.status"
+        class="tasks__filter"
+        multiple
+        collapse-tags
+        clearable
+        placeholder="状态"
+        @change="handleFilterChange"
+      >
+        <el-option
+          v-for="item in statusOptions"
+          :key="item.value"
+          :label="item.label"
+          :value="item.value"
+        />
+      </el-select>
+
+      <el-select
+        v-model="filters.category_id"
+        class="tasks__filter"
+        clearable
+        placeholder="分类"
+        @change="handleFilterChange"
+      >
+        <!-- 0 是后端定义的「未分类」，是有效筛选值，不能被当成「没选」 -->
+        <el-option label="未分类" :value="0" />
+        <el-option
+          v-for="item in taskCategories"
+          :key="item.id"
+          :label="item.name"
+          :value="item.id"
+        />
+      </el-select>
+
+      <el-select
+        v-model="filters.priority"
+        class="tasks__filter"
+        clearable
+        placeholder="优先级"
+        @change="handleFilterChange"
+      >
+        <el-option
+          v-for="item in priorityOptions"
+          :key="item.value"
+          :label="item.label"
+          :value="item.value"
+        />
+      </el-select>
+
+      <el-date-picker
+        v-model="filters.due_range"
+        class="tasks__filter tasks__filter--date"
+        type="daterange"
+        value-format="yyyy-MM-dd"
+        range-separator="至"
+        start-placeholder="截止起"
+        end-placeholder="截止止"
+        unlink-panels
+        @change="handleFilterChange"
+      />
+
+      <el-button type="text" size="small" @click="resetFilters">重置</el-button>
     </div>
 
     <el-table
@@ -90,6 +167,15 @@ const PRIORITY_MAP = {
   high: { label: '高', type: 'danger' }
 }
 
+// 筛选条的初值：每次重置都要一份新对象，所以写成函数
+const emptyFilters = () => ({
+  keyword: '',
+  status: [],
+  category_id: '',
+  priority: '',
+  due_range: []
+})
+
 export default {
   name: 'TasksView',
   components: { PaginationBar },
@@ -99,10 +185,26 @@ export default {
       rows: [],
       total: 0,
       page: 1,
-      size: 20
+      size: 20,
+      filters: emptyFilters(),
+      statusOptions: Object.keys(STATUS_MAP).map((value) => ({
+        value,
+        label: STATUS_MAP[value].label
+      })),
+      priorityOptions: Object.keys(PRIORITY_MAP).map((value) => ({
+        value,
+        label: PRIORITY_MAP[value].label
+      }))
+    }
+  },
+  computed: {
+    // 分类下拉的选项来自 Vuex 缓存（dispatch 一次，10 分钟内复用）
+    taskCategories() {
+      return this.$store.getters['categories/listOf']('task')
     }
   },
   created() {
+    this.loadCategories()
     this.fetchData()
   },
   methods: {
@@ -116,11 +218,31 @@ export default {
       return PRIORITY_MAP[priority] || { label: priority, type: '' }
     },
 
-    // 只读版：只有 page/size 两个参数，筛选在 4b 里加
+    loadCategories() {
+      // 缓存命中 / 并发去重 / 真正发请求，三个分支都在 categories 模块里，页面不用管
+      return this.$store.dispatch('categories/load', 'task')
+    },
+
+    // 把界面上的筛选值翻成后端的参数名；空值交给 compactParams 剔除
+    buildParams() {
+      const { keyword, status, category_id, priority, due_range } = this.filters
+      const range = due_range || []
+      return {
+        page: this.page,
+        size: this.size,
+        keyword: keyword.trim(),
+        status,
+        category_id,
+        priority,
+        due_from: range[0],
+        due_to: range[1]
+      }
+    },
+
     async fetchData() {
       this.loading = true
       try {
-        const data = await listTasks({ page: this.page, size: this.size })
+        const data = await listTasks(this.buildParams())
         this.rows = data.items
         this.total = data.total
       } catch (e) {
@@ -130,6 +252,17 @@ export default {
       } finally {
         this.loading = false
       }
+    },
+
+    // 改筛选必须回第 1 页：第 3 页改完条件后结果可能只剩 1 页，留在第 3 页就是空白
+    handleFilterChange() {
+      this.page = 1
+      this.fetchData()
+    },
+
+    resetFilters() {
+      this.filters = emptyFilters()
+      this.handleFilterChange()
     },
 
     handlePageChange({ page, size }) {
@@ -161,6 +294,22 @@ export default {
   &__hint {
     font-size: 13px;
     color: #909399;
+  }
+
+  &__filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding-bottom: 12px;
+  }
+
+  &__filter {
+    width: 160px;
+
+    &--date {
+      width: 300px;
+    }
   }
 
   &__desc {
