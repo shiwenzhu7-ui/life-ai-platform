@@ -118,7 +118,7 @@
 </template>
 
 <script>
-import { listExpenses } from '@/api/expenses'
+import { deleteExpense, listExpenses } from '@/api/expenses'
 import { formatDateTime, formatMoney } from '@/utils/format'
 import PaginationBar from '@/components/PaginationBar.vue'
 import ExpenseFormDialog from '@/components/ExpenseFormDialog.vue'
@@ -247,8 +247,28 @@ export default {
       this.$message.info('编辑在 F6c 实现')
     },
 
-    remove() {
-      this.$message.info('删除在 F6c 实现')
+    // 删除：后端是软删（只写 deleted_at），界面上表现为「消失」
+    async remove(row) {
+      try {
+        await this.$confirm(
+          `确定删除这笔 ${this.amountText(row)}（${row.category_name || '未分类'}）？删除后列表与汇总都不再统计。`,
+          '删除记录',
+          { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+        )
+      } catch (e) {
+        return // 点了取消 / 关闭，什么都不做
+      }
+      try {
+        await deleteExpense(row.id)
+        this.$message.success('已删除')
+        // 删掉的是当前页最后一条时回退一页，否则会停在一个空页上
+        if (this.rows.length === 1 && this.page > 1) {
+          this.page -= 1
+        }
+        this.fetchData()
+      } catch (e) {
+        // 提示已由 request.js 统一弹过（例如并发删除导致的 404），这里不重复弹
+      }
     }
   }
 }
