@@ -7,6 +7,14 @@
       </el-button>
     </div>
 
+    <ExpenseSummary
+      :summary="summary"
+      :month="month"
+      :loading="summaryLoading"
+      @shift="handleMonthShift"
+      @current="handleMonthCurrent"
+    />
+
     <!-- 筛选条：四个维度照 docs/页面设计.md §1.5 的接口映射表（type / category_id / keyword / 日期） -->
     <div class="expenses__filters">
       <el-input
@@ -18,8 +26,7 @@
         @keyup.enter.native="handleFilterChange"
         @clear="handleFilterChange"
       />
-      <el-button size="small" @click="
-      ">搜索</el-button>
+      <el-button size="small" @click="handleFilterChange">搜索</el-button>
 
       <el-select
         v-model="filters.type"
@@ -123,10 +130,11 @@
 </template>
 
 <script>
-import { deleteExpense, listExpenses } from '@/api/expenses'
+import { deleteExpense, getExpenseSummary, listExpenses } from '@/api/expenses'
 import { formatDateTime, formatMoney } from '@/utils/format'
 import PaginationBar from '@/components/PaginationBar.vue'
 import ExpenseFormDialog from '@/components/ExpenseFormDialog.vue'
+import ExpenseSummary from '@/components/ExpenseSummary.vue'
 
 // 类型映射放在组件外：常量没必要做成响应式
 const TYPE_MAP = {
@@ -144,7 +152,7 @@ const emptyFilters = () => ({
 
 export default {
   name: 'ExpensesView',
-  components: { PaginationBar, ExpenseFormDialog },
+  components: { PaginationBar, ExpenseFormDialog, ExpenseSummary },
   data() {
     return {
       loading: false,
@@ -153,6 +161,12 @@ export default {
       page: 1,
       size: 20,
       filters: emptyFilters(),
+      // 汇总区：month 为空表示不传，由后端默认当月
+      month: '',
+      summary: null,
+      summaryLoading: false,
+      // 请求序号：只认最新一次 summary 请求的结果
+      summarySeq: 0,
       // 记一笔 / 编辑 弹窗（null = 新建）
       dialogVisible: false,
       editingId: null,
@@ -174,6 +188,7 @@ export default {
     this.loadCategories('expense')
     this.loadCategories('income')
     this.fetchData()
+    this.fetchSummary()
   },
   methods: {
     formatDateTime,
@@ -255,6 +270,43 @@ export default {
     onSaved() {
       if (!this.editingId) this.page = 1
       this.fetchData()
+      // 金额变了 → 汇总必须跟着刷新，否则顶部数字还是旧的
+      this.fetchSummary()
+    },
+
+    // 汇总区：只跟月份走，与列表的筛选条件互不影响
+    // seq 用来丢弃过期响应：连点两下箭头时，后发的请求可能先回来，
+    // 不加这层会看到「月份是 2026-08、数字却是 2026-09 的」
+    async fetchSummary() {
+      const seq = ++this.summarySeq
+      this.summaryLoading = true
+      try {
+        const data = await getExpenseSummary(this.month || undefined)
+        if (seq !== this.summarySeq) return
+        this.summary = data
+      } catch (e) {
+        // 提示已由 request.js 统一弹过；置空让卡片显示 0.00，别留着上个月的数字
+        if (seq === this.summarySeq) this.summary = null
+      } finally {
+        if (seq === this.summarySeq) this.summaryLoading = false
+      }
+    },
+
+    // 翻月：用 Date 的「溢出归一」处理跨年（2026-01 往前一个月会得到 2025-12）
+    handleMonthShift(delta) {
+      const base = this.month
+        ? new Date(`${this.month}-01T00:00:00`)
+        : new Date()
+      const target = new Date(base.getFullYear(), base.getMonth() + delta, 1)
+      const month = String(target.getMonth() + 1).padStart(2, '0')
+      this.month = `${target.getFullYear()}-${month}`
+      this.fetchSummary()
+    },
+
+    // 回到当月：清空 month，让后端用默认值（省得前端自己算今天几号）
+    handleMonthCurrent() {
+      this.month = ''
+      this.fetchSummary()
     },
 
     // 删除：后端是软删（只写 deleted_at），界面上表现为「消失」
@@ -276,6 +328,7 @@ export default {
           this.page -= 1
         }
         this.fetchData()
+        this.fetchSummary()
       } catch (e) {
         // 提示已由 request.js 统一弹过（例如并发删除导致的 404），这里不重复弹
       }
