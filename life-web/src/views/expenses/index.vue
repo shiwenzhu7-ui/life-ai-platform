@@ -18,7 +18,8 @@
         @keyup.enter.native="handleFilterChange"
         @clear="handleFilterChange"
       />
-      <el-button size="small" @click="handleFilterChange">搜索</el-button>
+      <el-button size="small" @click="
+      ">搜索</el-button>
 
       <el-select
         v-model="filters.type"
@@ -111,6 +112,8 @@
     </el-table>
 
     <PaginationBar :page="page" :size="size" :total="total" @change="handlePageChange" />
+
+    <ExpenseFormDialog :visible.sync="dialogVisible" @saved="onSaved" />
   </div>
 </template>
 
@@ -118,6 +121,7 @@
 import { listExpenses } from '@/api/expenses'
 import { formatDateTime, formatMoney } from '@/utils/format'
 import PaginationBar from '@/components/PaginationBar.vue'
+import ExpenseFormDialog from '@/components/ExpenseFormDialog.vue'
 
 // 类型映射放在组件外：常量没必要做成响应式
 const TYPE_MAP = {
@@ -135,7 +139,7 @@ const emptyFilters = () => ({
 
 export default {
   name: 'ExpensesView',
-  components: { PaginationBar },
+  components: { PaginationBar, ExpenseFormDialog },
   data() {
     return {
       loading: false,
@@ -144,6 +148,8 @@ export default {
       page: 1,
       size: 20,
       filters: emptyFilters(),
+      // 记一笔弹窗
+      dialogVisible: false,
       typeOptions: Object.keys(TYPE_MAP).map((value) => ({
         value,
         label: TYPE_MAP[value].label
@@ -169,10 +175,6 @@ export default {
     amountText(row) {
       const sign = TYPE_MAP[row.type] ? TYPE_MAP[row.type].sign : ''
       return sign + formatMoney(row.amount)
-    },
-
-    typeLabel(type) {
-      return TYPE_MAP[type] ? TYPE_MAP[type].label : type
     },
 
     loadCategories(scope) {
@@ -232,7 +234,13 @@ export default {
     },
 
     openCreate() {
-      this.$message.info('记一笔在 F6b 实现')
+      this.dialogVisible = true
+    },
+
+    // 记完一笔：列表必须重拉（新记录可能落在当前页任意位置，还可能是别的日期）
+    onSaved() {
+      this.page = 1
+      this.fetchData()
     },
 
     openEdit() {
@@ -298,3 +306,4 @@ export default {
   }
 }
 </style>
+
