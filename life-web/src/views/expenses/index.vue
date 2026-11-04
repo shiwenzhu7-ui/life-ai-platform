@@ -113,7 +113,12 @@
 
     <PaginationBar :page="page" :size="size" :total="total" @change="handlePageChange" />
 
-    <ExpenseFormDialog :visible.sync="dialogVisible" @saved="onSaved" />
+    <ExpenseFormDialog
+      :visible.sync="dialogVisible"
+      :expense-id="editingId"
+      @saved="onSaved"
+      @failed="fetchData"
+    />
   </div>
 </template>
 
@@ -148,8 +153,9 @@ export default {
       page: 1,
       size: 20,
       filters: emptyFilters(),
-      // 记一笔弹窗
+      // 记一笔 / 编辑 弹窗（null = 新建）
       dialogVisible: false,
+      editingId: null,
       typeOptions: Object.keys(TYPE_MAP).map((value) => ({
         value,
         label: TYPE_MAP[value].label
@@ -234,17 +240,21 @@ export default {
     },
 
     openCreate() {
+      this.editingId = null
       this.dialogVisible = true
     },
 
-    // 记完一笔：列表必须重拉（新记录可能落在当前页任意位置，还可能是别的日期）
-    onSaved() {
-      this.page = 1
-      this.fetchData()
+    // 只传 id：整行数据可能已经旧了，让弹窗自己去拉最新的
+    openEdit(row) {
+      this.editingId = row.id
+      this.dialogVisible = true
     },
 
-    openEdit() {
-      this.$message.info('编辑在 F6c 实现')
+    // 记完一笔：新记录可能落在当前页任意位置，还可能换了日期，所以回第 1 页；
+    // 编辑则留在当前页，避免「只改了个备注却跳页」
+    onSaved() {
+      if (!this.editingId) this.page = 1
+      this.fetchData()
     },
 
     // 删除：后端是软删（只写 deleted_at），界面上表现为「消失」

@@ -90,7 +90,7 @@
 </template>
 
 <script>
-import { createExpense } from '@/api/expenses'
+import { createExpense, getExpense, updateExpense } from '@/api/expenses'
 import { toApiDateTime } from '@/utils/format'
 
 const ACCOUNT_OPTIONS = ['现金', '支付宝', '微信', '银行卡']
@@ -98,6 +98,15 @@ const ACCOUNT_OPTIONS = ['现金', '支付宝', '微信', '银行卡']
 // 后端金额上限（Decimal(12,2)）：前端也拦一道，省一次 422
 const MAX_AMOUNT = 9999999.99
 const AMOUNT_PATTERN = /^\d+(\.\d{1,2})?$/
+
+// "1280.5" 和 "1280.50" 是同一个金额，比较"改没改"之前必须先归一，
+// 否则打开编辑框什么都不动，也会被判成金额变了
+function normalizeAmount(value) {
+  const text = String(value || '').trim()
+  if (!AMOUNT_PATTERN.test(text)) return text
+  const [int, dec = ''] = text.split('.')
+  return `${Number(int)}.${dec.padEnd(2, '0')}`
+}
 
 // 新建时每次都要一份新对象；时间默认「现在」
 const emptyForm = () => ({
@@ -112,12 +121,16 @@ const emptyForm = () => ({
 export default {
   name: 'ExpenseFormDialog',
   props: {
-    visible: { type: Boolean, default: false }
+    visible: { type: Boolean, default: false },
+    // null = 新建；数字 = 编辑这一条
+    expenseId: { type: Number, default: null }
   },
   data() {
     return {
       form: emptyForm(),
       saving: false,
+      // 打开时的快照，用来算「改了哪些字段」
+      snapshot: null,
       accountOptions: ACCOUNT_OPTIONS,
       // 后端只接受「不晚于现在 1 天」，所以后天及以后直接禁选
       pickerOptions: {
@@ -128,8 +141,12 @@ export default {
     }
   },
   computed: {
+    isEdit() {
+      return this.expenseId !== null && this.expenseId !== undefined
+    },
     title() {
-      return this.form.type === 'income' ? '记一笔收入' : '记一笔支出'
+      const prefix = this.isEdit ? '编辑' : '记一笔'
+      return prefix + (this.form.type === 'income' ? '收入' : '支出')
     },
     // 分类数据源跟着类型走：expense 域 9 个 / income 域 5 个
     categories() {
@@ -145,6 +162,56 @@ export default {
   methods: {
     init() {
       this.form = emptyForm()
+      this.snapshot = null
+      if (this.isEdit) {
+        this.loadExpense()
+      } else {
+        // 新建：空表单本身就是「改动前」的状态
+        this.snapshot = this.serialize()
+      }
+    },
+
+    // 编辑：先拉最新的（列表里那行可能是几分钟前取的），再回填
+    async loadExpense() {
+      try {
+        const expense = await getExpense(this.expenseId)
+        this.form = {
+          type: expense.type,
+          amount: expense.amount, // 后端返回的就是两位小数字符串
+          category_id: expense.category_id,
+          account: expense.account || '现金',
+          occurred_at: new Date(expense.occurred_at),
+          note: expense.note || ''
+        }
+        this.snapshot = this.serialize()
+      } catch (e) {
+        // 这条已被删 / 不属于你 → 404。提示已由 request.js 弹过，
+        // 这里关掉弹窗并让父组件刷新，别留一张空表单在屏幕上
+        this.$emit('update:visible', false)
+        this.$emit('failed')
+      }
+    },
+
+    // 把表单压成「可比较的快照」：Date → 毫秒、空串 → null、金额 → 两位小数
+    serialize() {
+      return {
+        type: this.form.type,
+        amount: normalizeAmount(this.form.amount),
+        category_id: this.form.category_id,
+        account: (this.form.account || '').trim() || '现金',
+        occurred_at: this.form.occurred_at ? this.form.occurred_at.getTime() : null,
+        note: this.form.note.trim() || null
+      }
+    },
+
+    // 只挑与快照不同的字段：只改备注时，请求体就只有 {"note": "..."}
+    buildDiff() {
+      const current = this.serialize()
+      const diff = {}
+      Object.keys(current).forEach((key) => {
+        if (current[key] !== this.snapshot[key]) diff[key] = current[key]
+      })
+      return diff
     },
 
     // 换类型必须清空分类：两个域的分类 id 不通用，留着就会被后端判成「分类不存在」
@@ -173,19 +240,28 @@ export default {
 
       this.saving = true
       try {
-        await createExpense({
-          type: this.form.type,
-          amount: this.form.amount.trim(),
-          category_id: this.form.category_id,
-          account: this.form.account || '现金',
-          occurred_at: toApiDateTime(this.form.occurred_at),
-          note: this.form.note.trim() || null
-        })
-        this.$message.success('已记一笔')
+        if (this.isEdit) {
+          const diff = this.buildDiff()
+          if (!Object.keys(diff).length) {
+            this.$message.info('没有改动')
+            return
+          }
+          // 快照里时间是毫秒（为了能比较），发给后端要转回 +08:00 字符串
+          if ('occurred_at' in diff) {
+            diff.occurred_at = toApiDateTime(new Date(diff.occurred_at))
+          }
+          await updateExpense(this.expenseId, diff)
+          this.$message.success('已保存')
+        } else {
+          const payload = this.serialize()
+          payload.occurred_at = toApiDateTime(this.form.occurred_at)
+          await createExpense(payload)
+          this.$message.success('已记一笔')
+        }
         this.$emit('saved')
         this.$emit('update:visible', false)
       } catch (e) {
-        // 失败（422/500/断网）：提示已由 request.js 统一弹过，
+        // 失败（422/404/断网）：提示已由 request.js 统一弹过，
         // 这里什么都不做——弹窗和已填的内容都要留着，别让用户重填
       } finally {
         this.saving = false
