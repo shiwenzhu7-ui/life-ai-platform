@@ -49,7 +49,12 @@ from modules.shared.money import money
 TASK_STATUSES = ("todo", "doing", "done", "cancelled")
 # 「还算活着、会逾期」的状态：done/cancelled 不再计逾期，也不再进首页列表
 ACTIVE_STATUSES = ("todo", "doing")
-FOCUS_LIMIT = 5
+# 首页列表的配额：逾期最多 3 条、今日到期最多 2 条，合计最多 5 条。
+# 为什么不是「混排取最早 5 条」：逾期一多（比如 8 条），今天到期的那条虽然也在候选里，
+# 却永远排不进前 5 —— 卡片标题写着「逾期与今日到期」，实际一条今天的事都看不到。
+FOCUS_OVERDUE_LIMIT = 3
+FOCUS_TODAY_LIMIT = 2
+FOCUS_LIMIT = FOCUS_OVERDUE_LIMIT + FOCUS_TODAY_LIMIT
 
 
 def _task_scope(user_id: int) -> list[ColumnElement]:
@@ -82,9 +87,10 @@ def _task_counts(
     逾期与今日到期**刻意不重叠**：
       逾期     due_at < 现在
       今日到期 due_at >= 现在 且 < 明天 00:00
-    这样「逾期 4 + 今日到期 2」就是首页列表最多会出现的总条数，用户不会疑惑
-    「为什么说逾期 4 条，列表里却有 6 条」。代价是今天上午已过点的待办只算逾期，
-    不再算「今日到期」—— 卡片上两个数字相加才是重点数量。
+    这两个数字统计的是全量（卡片上要给准数），而首页列表是配额制
+    （逾期最多 3 + 今日到期最多 2），所以列表条数可能少于两数之和 —— 这是有意的：
+    列表要保证「今天到期」有位置，统计不需要。代价是今天上午已过点的待办只算逾期，
+    不再算「今日到期」。
     """
     rows = db.execute(
         select(Task.status, func.count()).where(*_task_scope(user_id)).group_by(Task.status)
@@ -140,32 +146,52 @@ def _expense_total(db: Session, user_id: int, *, start_utc: datetime, end_utc: d
 
 
 def _focus_tasks(
-    db: Session, user_id: int, *, tomorrow_start_utc: datetime, limit: int = FOCUS_LIMIT
+    db: Session,
+    user_id: int,
+    *,
+    now_utc: datetime,
+    tomorrow_start_utc: datetime,
 ) -> list[Task]:
-    """逾期与今日到期混排的待办，最多 limit 条。
+    """首页列表：逾期最多 3 条 + 今日到期最多 2 条，合计最多 5 条。
 
-    `due_at < 明天 00:00` 一条就同时覆盖「已逾期」和「今天到期」：
-    逾期的时间点必然也早于明天 00:00，不需要再 OR 一个 due_at < now。
+    两条 SQL 各取各的配额，而不是一条「due_at < 明天 0 点」再 LIMIT 5：
+    后者在逾期超过 5 条时会把今天到期的一律挤掉，而「今天到期」才是当天该做的事。
+
+    配额没占满时就少返回，不做补齐 —— 补齐会把「今天的事」换成别的逾期，更乱。
+
+    逾期在前：它更急，且 due_at 本来就更早，拼接后整体仍按时间递增。
+    两段都 ORDER BY due_at ASC, id DESC：第二键与待办列表（tasks/crud.py 的
+    list_for_user）一致，否则用户从首页点「查看全部」会发现并列的那几条换了顺序。
 
     `due_at IS NOT NULL` 是显式冗余（SQL 里 NULL < x 得 NULL，本来就不成立），
     写出来是为了让读的人不必在脑子里推一遍。
-
-    第二排序键用 `id DESC`，与待办列表（tasks/crud.py 的 list_for_user）一致：
-    同一个截止时间可能有多条，两处若各排各的，用户在首页点「查看全部」跳到待办页
-    会发现那几条换了顺序。方向选 DESC 也是跟待办页对齐：同样紧急时，新记的在前。
     """
-    rows = db.scalars(
+    overdue = db.scalars(
         select(Task)
         .where(
             *_task_scope(user_id),
             Task.due_at.is_not(None),
+            Task.due_at < now_utc,
+            Task.status.in_(ACTIVE_STATUSES),
+        )
+        .order_by(Task.due_at.asc(), Task.id.desc())
+        .limit(FOCUS_OVERDUE_LIMIT)
+    ).all()
+
+    today_due = db.scalars(
+        select(Task)
+        .where(
+            *_task_scope(user_id),
+            Task.due_at.is_not(None),
+            Task.due_at >= now_utc,
             Task.due_at < tomorrow_start_utc,
             Task.status.in_(ACTIVE_STATUSES),
         )
         .order_by(Task.due_at.asc(), Task.id.desc())
-        .limit(limit)
+        .limit(FOCUS_TODAY_LIMIT)
     ).all()
-    return list(rows)
+
+    return [*overdue, *today_due]
 
 
 def overview(db: Session, user_id: int, *, now_bj: datetime | None = None) -> DashboardOverview:
@@ -199,7 +225,9 @@ def overview(db: Session, user_id: int, *, now_bj: datetime | None = None) -> Da
         now_utc=now_utc,
         tomorrow_start_utc=tomorrow_start_utc,
     )
-    focus = _focus_tasks(db, user_id, tomorrow_start_utc=tomorrow_start_utc)
+    focus = _focus_tasks(
+        db, user_id, now_utc=now_utc, tomorrow_start_utc=tomorrow_start_utc
+    )
 
     return DashboardOverview(
         tasks=TaskStats(**counts),
