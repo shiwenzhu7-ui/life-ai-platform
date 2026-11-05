@@ -45,7 +45,7 @@
             上月 <b>¥{{ money(expense.last_month_total) }}</b>
             <span class="amount__gap">今日 <b>¥{{ money(expense.today_total) }}</b></span>
           </p>
-          <!-- F7-3 在这里放 7 天迷你柱状图 -->
+          <SparkBar :days="recent7d" />
         </OverviewCard>
       </div>
     </template>
@@ -56,6 +56,7 @@
 import { getOverview } from '@/api/dashboard'
 import { formatMoney } from '@/utils/format'
 import OverviewCard from '@/components/OverviewCard'
+import SparkBar from '@/components/SparkBar'
 
 // 按北京时间判断问候语；只影响文案，不影响任何数据口径
 function beijingHour() {
@@ -66,7 +67,7 @@ function beijingHour() {
 
 export default {
   name: 'DashboardView',
-  components: { OverviewCard },
+  components: { OverviewCard, SparkBar },
   data() {
     return {
       loading: false,
@@ -79,6 +80,9 @@ export default {
     },
     expense() {
       return (this.overview && this.overview.expense) || {}
+    },
+    recent7d() {
+      return (this.overview && this.overview.recent_7d) || []
     },
     greeting() {
       const h = beijingHour()
