@@ -11,7 +11,7 @@
 
 from datetime import date, timedelta
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, case, func, or_, select
 from sqlalchemy.orm import Session
 
 from core.time import beijing_day_start_utc, now_utc, to_utc_naive
@@ -22,6 +22,52 @@ from modules.lifeweb.tasks.schema import TaskCreate, TaskUpdate
 def _base_query(user_id: int) -> Select:
     """所有查询的公共起点：限本人 + 未删除。"""
     return select(Task).where(Task.user_id == user_id, Task.deleted_at.is_(None))
+
+
+# 优先级没有天然大小：数据库里是枚举，按字母排会是 high < low < medium（毫无意义）。
+# 用 CASE 折算：high=3 / medium=2 / low=1 —— 数值越大越急，
+# 于是 order=desc 就是「高 → 低」，和前端下拉的文字一致。
+# 不用 FIELD() 是为了不绑 MySQL 方言。
+_PRIORITY_RANK = case(
+    (Task.priority == "high", 3),
+    (Task.priority == "medium", 2),
+    else_=1,
+)
+
+
+def _order_by(sort: str, order: str) -> list:
+    """把 (sort, order) 翻成 SQLAlchemy 的 order_by 子句列表。
+
+    三条排序键都补一个 `Task.id.desc()` 兜底：数据库不保证相同排序键的返回顺序稳定，
+    不补的话两条记录可能在翻页时重复出现或彻底消失。
+
+    due_at 排序额外带 `Task.due_at.is_(None)` 打头：MySQL 没有 NULLS LAST，
+    用「是否为空」当第一键把空值永远压到最后（升序降序都一样，因为它是布尔值）。
+    """
+    descending = order == "desc"
+
+    if sort == "created_at":
+        return [
+            Task.created_at.desc() if descending else Task.created_at.asc(),
+            Task.id.desc(),
+        ]
+
+    if sort == "priority":
+        # 按优先级排时，第二键用 due_at（同优先级里先到期的在前），空值仍置后
+        return [
+            _PRIORITY_RANK.desc() if descending else _PRIORITY_RANK.asc(),
+            Task.due_at.is_(None),
+            Task.due_at.asc(),
+            Task.id.desc(),
+        ]
+
+    # 默认：due_at
+    return [
+        Task.due_at.is_(None),
+        Task.due_at.desc() if descending else Task.due_at.asc(),
+        Task.id.desc(),
+    ]
+
 
 
 def list_for_user(
@@ -37,6 +83,8 @@ def list_for_user(
     due_from: date | None = None,
     due_to: date | None = None,
     overdue: bool = False,
+    sort: str = "due_at",
+    order: str = "asc",
 ) -> tuple[list[Task], int]:
     """当前用户的待办列表（分页 + 筛选），返回 (当页数据, 总数)。
 
@@ -45,9 +93,10 @@ def list_for_user(
 
     total 必须按「筛选后」的条件算，否则分页器显示「共 11 条」但实际只筛出 3 条。
 
-    排序按 docs/接口设计.md §1.5：due_at 升序、空值置后；
+    排序默认按 docs/接口设计.md §1.5：due_at 升序、空值置后；
     同一时刻的再用 id 倒序兜底 —— 否则两条 due_at 相同的记录在翻页时
     可能第 1 页和第 2 页都出现（数据库不保证相同排序键的返回顺序稳定）。
+    具体排序键由 `_order_by(sort, order)` 决定，默认参数保持原行为。
     """
     conds: list = []
 
@@ -94,12 +143,8 @@ def list_for_user(
     # 总数要在分页之前算，否则拿到的是「当页条数」
     total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
 
-    # MySQL 没有 NULLS LAST：先按「是否 NULL」升序（NULL 排最后），再按 due_at 升序
-    stmt = (
-        base.order_by(Task.due_at.is_(None), Task.due_at.asc(), Task.id.desc())
-        .offset((page - 1) * size)
-        .limit(size)
-    )
+    # 排序见 _order_by：默认「到期升序，空值置后，id 倒序兜底」
+    stmt = base.order_by(*_order_by(sort, order)).offset((page - 1) * size).limit(size)
     items = list(db.scalars(stmt).all())
     return items, int(total)
 

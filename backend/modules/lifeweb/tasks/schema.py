@@ -16,6 +16,10 @@ Priority = Literal["low", "medium", "high"]
 # 必须与 model.TASK_STATUSES 一字不差（模型里那份是数据库 ENUM 的镜像）
 TaskStatus = Literal["todo", "doing", "done", "cancelled"]
 
+# 列表排序：三个键 + 升降序（docs/页面设计.md:81 的元素表要求能按优先级/创建时间排）
+TaskSort = Literal["due_at", "created_at", "priority"]
+SortOrder = Literal["asc", "desc"]
+
 # 允许被显式改成 null 的字段（其余字段传 null 一律 422）
 NULLABLE_FIELDS = ("description", "due_at")
 

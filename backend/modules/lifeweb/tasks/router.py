@@ -17,8 +17,10 @@ from core.time import now_utc
 from modules.lifeweb.tasks import crud
 from modules.lifeweb.tasks.schema import (
     Priority,
+    SortOrder,
     TaskCreate,
     TaskOut,
+    TaskSort,
     TaskStatus,
     TaskStatusUpdate,
     TaskUpdate,
@@ -68,10 +70,14 @@ def list_tasks(
     due_from: date | None = Query(default=None, description="截止日期起（含当天），YYYY-MM-DD"),
     due_to: date | None = Query(default=None, description="截止日期止（含当天），YYYY-MM-DD"),
     overdue: bool = Query(default=False, description="true 只看逾期"),
+    sort: TaskSort = Query(
+        default="due_at", description="排序键：due_at / created_at / priority"
+    ),
+    order: SortOrder = Query(default="asc", description="升降序：asc / desc"),
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ) -> Page[TaskOut]:
-    """列表 + 筛选。
+    """列表 + 筛选 + 排序。
 
     未声明的查询参数会被 FastAPI 静默忽略（照样返回 200，只是没筛），
     所以文档里写了的每个筛选参数都必须在这里显式声明。
@@ -91,6 +97,8 @@ def list_tasks(
         due_from=due_from,
         due_to=due_to,
         overdue=overdue,
+        sort=sort,
+        order=order,
     )
     now = now_utc()  # 同一个请求里只取一次时间，保证整页的 is_overdue 口径一致
     names = categories_crud.name_map(db)  # 整页共用一张 {id: 名字}，不做 N+1

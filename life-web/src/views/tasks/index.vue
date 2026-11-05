@@ -81,6 +81,20 @@
         @change="handleFilterChange"
       />
 
+      <el-select
+        v-model="sortValue"
+        class="tasks__filter tasks__filter--sort"
+        placeholder="排序"
+        @change="handleFilterChange"
+      >
+        <el-option
+          v-for="item in sortOptions"
+          :key="item.value"
+          :label="item.label"
+          :value="item.value"
+        />
+      </el-select>
+
       <el-button type="text" size="small" @click="resetFilters">重置</el-button>
     </div>
 
@@ -184,13 +198,26 @@ const PRIORITY_MAP = {
   high: { label: '高', type: 'danger' }
 }
 
+// 排序下拉的六个选项：把「排序键 + 方向」拼成一个值，用户只需选一次
+const SORT_OPTIONS = [
+  { value: 'due_at:asc', label: '到期（近 → 远）' },
+  { value: 'due_at:desc', label: '到期（远 → 近）' },
+  { value: 'priority:desc', label: '优先级（高 → 低）' },
+  { value: 'priority:asc', label: '优先级（低 → 高）' },
+  { value: 'created_at:desc', label: '创建（新 → 旧）' },
+  { value: 'created_at:asc', label: '创建（旧 → 新）' }
+]
+
 // 筛选条的初值：每次重置都要一份新对象，所以写成函数
 const emptyFilters = () => ({
   keyword: '',
   status: [],
   category_id: '',
   priority: '',
-  due_range: []
+  due_range: [],
+  // 排序不进「筛选」语义，但它和筛选一样决定列表长什么样，所以放同一份状态里一起重置
+  sort: 'due_at',
+  order: 'asc'
 })
 
 export default {
@@ -216,13 +243,26 @@ export default {
       priorityOptions: Object.keys(PRIORITY_MAP).map((value) => ({
         value,
         label: PRIORITY_MAP[value].label
-      }))
+      })),
+      sortOptions: SORT_OPTIONS
     }
   },
   computed: {
     // 分类下拉的选项来自 Vuex 缓存（dispatch 一次，10 分钟内复用）
     taskCategories() {
       return this.$store.getters['categories/listOf']('task')
+    },
+
+    // 下拉绑一个字符串，state 里仍分成 sort/order 两项（后端就是两个参数）
+    sortValue: {
+      get() {
+        return `${this.filters.sort}:${this.filters.order}`
+      },
+      set(value) {
+        const [sort, order] = value.split(':')
+        this.filters.sort = sort
+        this.filters.order = order
+      }
     }
   },
   created() {
@@ -247,7 +287,7 @@ export default {
 
     // 把界面上的筛选值翻成后端的参数名；空值交给 compactParams 剔除
     buildParams() {
-      const { keyword, status, category_id, priority, due_range } = this.filters
+      const { keyword, status, category_id, priority, due_range, sort, order } = this.filters
       const range = due_range || []
       return {
         page: this.page,
@@ -257,7 +297,9 @@ export default {
         category_id,
         priority,
         due_from: range[0],
-        due_to: range[1]
+        due_to: range[1],
+        sort,
+        order
       }
     },
 
@@ -378,6 +420,11 @@ export default {
 
     &--date {
       width: 300px;
+    }
+
+    // 排序的选项文字比「优先级」「分类」长，给宽一点免得截断
+    &--sort {
+      width: 170px;
     }
   }
 
