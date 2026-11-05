@@ -48,6 +48,35 @@
           <SparkBar :days="recent7d" />
         </OverviewCard>
       </div>
+
+      <OverviewCard
+        class="dash__focus"
+        title="逾期与今日到期（最多 5 条）"
+        to="/tasks"
+        link-text="查看全部"
+      >
+        <p v-if="!focusTasks.length" class="focus__empty">今天没有待办，休息一下</p>
+
+        <ul v-else class="focus">
+          <li v-for="row in focusTasks" :key="row.id" class="focus__row">
+            <span class="focus__flag" :class="{ 'focus__flag--on': row.is_overdue }">
+              {{ row.is_overdue ? '!' : '' }}
+            </span>
+            <span class="focus__title" :title="row.title">{{ row.title }}</span>
+            <span class="focus__time">{{ whenLabel(row.due_at) }}</span>
+            <span class="focus__due" :class="{ 'focus__due--overdue': row.is_overdue }">
+              {{ dueLabel(row) }}
+            </span>
+          </li>
+        </ul>
+      </OverviewCard>
+
+      <div class="dash__actions">
+        <el-button type="primary" size="small" icon="el-icon-plus" @click="go('/tasks')">
+          新建待办
+        </el-button>
+        <el-button size="small" icon="el-icon-plus" @click="go('/expenses')">记一笔</el-button>
+      </div>
     </template>
   </div>
 </template>
@@ -63,6 +92,24 @@ function beijingHour() {
   const now = new Date()
   const utc = now.getTime() + now.getTimezoneOffset() * 60000
   return new Date(utc + 8 * 3600000).getHours()
+}
+
+// 今天（北京时间）的 YYYY-MM-DD
+function beijingToday() {
+  const now = new Date()
+  const utc = now.getTime() + now.getTimezoneOffset() * 60000
+  const bj = new Date(utc + 8 * 3600000)
+  const mm = String(bj.getMonth() + 1).padStart(2, '0')
+  const dd = String(bj.getDate()).padStart(2, '0')
+  return `${bj.getFullYear()}-${mm}-${dd}`
+}
+
+// 两个 YYYY-MM-DD 相差几天（用 UTC 零点算，避免夏令时/时区干扰）
+function dayGap(from, to) {
+  const a = Date.parse(`${from}T00:00:00Z`)
+  const b = Date.parse(`${to}T00:00:00Z`)
+  if (Number.isNaN(a) || Number.isNaN(b)) return 0
+  return Math.round((b - a) / 86400000)
 }
 
 export default {
@@ -84,6 +131,9 @@ export default {
     recent7d() {
       return (this.overview && this.overview.recent_7d) || []
     },
+    focusTasks() {
+      return (this.overview && this.overview.focus_tasks) || []
+    },
     greeting() {
       const h = beijingHour()
       if (h < 6) return '凌晨好'
@@ -99,6 +149,36 @@ export default {
   methods: {
     money(value) {
       return formatMoney(value)
+    },
+    go(path) {
+      this.$router.push(path)
+    },
+    // 后端返回的 due_at 固定带 +08:00，所以前 10 位就是北京日期、11-16 位就是北京时间
+    beijingDate(iso) {
+      return typeof iso === 'string' && iso.length >= 10 ? iso.slice(0, 10) : ''
+    },
+    clock(iso) {
+      return typeof iso === 'string' && iso.length >= 16 ? iso.slice(11, 16) : ''
+    },
+    // 时间列：今天/明天用相对词，其余用 MM-DD
+    whenLabel(iso) {
+      if (!iso) return '—'
+      const gap = dayGap(beijingToday(), this.beijingDate(iso))
+      const time = this.clock(iso)
+      if (gap === 0) return `今天 ${time}`
+      if (gap === 1) return `明天 ${time}`
+      return `${this.beijingDate(iso).slice(5)} ${time}`
+    },
+    // 状态列：逾期几天 / 今天到期 / 明日到期 / 还有几天
+    dueLabel(row) {
+      if (!row.due_at) return '无期限'
+      const gap = dayGap(beijingToday(), this.beijingDate(row.due_at))
+      if (row.is_overdue) {
+        return gap < 0 ? `逾期 ${-gap} 天` : '今天已过期'
+      }
+      if (gap === 0) return '今天到期'
+      if (gap === 1) return '明日到期'
+      return `还有 ${gap} 天`
     },
     async fetchOverview() {
       this.loading = true
@@ -207,5 +287,70 @@ export default {
 
 .amount__gap {
   margin-left: 16px;
+}
+
+/* 逾期与今日到期 */
+.dash__focus {
+  margin-top: 16px;
+}
+
+.focus {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.focus__row {
+  display: grid;
+  align-items: center;
+  padding: 9px 6px;
+  border-bottom: 1px solid #f7f8fa;
+  font-size: 14px;
+  grid-template-columns: 16px 1fr 140px 96px;
+
+  &:last-child {
+    border-bottom: none;
+  }
+
+  &:hover {
+    background: #fafbfc;
+  }
+}
+
+.focus__flag {
+  font-weight: 700;
+  color: #f56c6c;
+}
+
+.focus__title {
+  overflow: hidden;
+  color: #303133;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.focus__time {
+  color: #909399;
+  font-size: 13px;
+}
+
+.focus__due {
+  text-align: right;
+  color: #909399;
+  font-size: 13px;
+}
+
+.focus__due--overdue {
+  color: #f56c6c;
+}
+
+.focus__empty {
+  margin: 2px 0;
+  color: #909399;
+  font-size: 13px;
+}
+
+.dash__actions {
+  margin-top: 16px;
 }
 </style>
