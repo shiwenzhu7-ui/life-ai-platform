@@ -37,6 +37,20 @@ class Settings(BaseSettings):
     # ---------- 跨域 ----------
     cors_origins: str = "http://localhost:8080,http://localhost:8081,http://localhost:8082"
 
+    # ---------- LLM（V1.1 AI 助手）----------
+    # 密钥只从环境变量读、绝不落库也绝不打进日志（NFR 11.1）。
+    # 默认空串：没配 key 时 AI 接口应当明确报「未配置」，而不是拿假 key 去调、
+    # 最后收到一个 401 让人误以为是网络问题。
+    llm_api_key: str = ""
+    # OpenAI 兼容端点；DeepSeek 官方也吃这个前缀
+    llm_base_url: str = "https://api.deepseek.com"
+    llm_model: str = "deepseek-chat"
+
+    @property
+    def llm_ready(self) -> bool:
+        """key 是否已配置 —— AI 接口用它决定是不是直接拒绝服务。"""
+        return bool(self.llm_api_key.strip())
+
     @property
     def cors_origin_list(self) -> list[str]:
         """逗号分隔的字符串 → 列表，供 CORSMiddleware 使用。"""

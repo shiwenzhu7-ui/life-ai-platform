@@ -12,9 +12,25 @@
 app.py 会 import 本模块，所以服务一启动元数据就是完整的。
 """
 
+from modules.lifeweb.ai.chat_message import ChatMessage  # noqa: F401
+from modules.lifeweb.ai.chat_session import ChatSession  # noqa: F401
+from modules.lifeweb.ai.pending_action import PendingAction  # noqa: F401
+from modules.lifeweb.ai.usage_log import UsageLog  # noqa: F401
 from modules.lifeweb.expenses.model import Expense  # noqa: F401
+from modules.lifeweb.shopping.model import ShoppingItem, ShoppingList  # noqa: F401
 from modules.lifeweb.tasks.model import Task  # noqa: F401
 from modules.shared.categories.model import Category  # noqa: F401
 from modules.shared.users.model import User  # noqa: F401
 
-__all__ = ["Category", "Expense", "Task", "User"]
+__all__ = [
+    "Category",
+    "ChatMessage",
+    "ChatSession",
+    "Expense",
+    "PendingAction",
+    "ShoppingItem",
+    "ShoppingList",
+    "Task",
+    "UsageLog",
+    "User",
+]
