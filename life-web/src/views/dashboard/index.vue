@@ -331,6 +331,8 @@ export default {
   margin: 0;
   padding: 0;
   list-style: none;
+  // 固定 5 行的位置：只有 3 条未完成时卡片不会突然矮一截（配额制下条数经常不满）
+  min-height: 186px;
 }
 
 .focus__row {

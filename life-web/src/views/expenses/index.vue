@@ -80,9 +80,29 @@
       row-key="id"
       border
       stripe
-      empty-text="还没有记账"
       style="width: 100%"
     >
+      <!-- 空态分两种：这个月还没记账（引导记一笔），和筛选没结果（引导清除筛选） -->
+      <template slot="empty">
+        <div class="empty-state">
+          <p class="empty-state__title">
+            {{ hasFilter ? '没有符合条件的记录' : '还没有记账' }}
+          </p>
+          <p class="empty-state__hint">
+            {{ hasFilter ? '试试放宽筛选条件，或者点下面清除筛选' : '记下第一笔，收支就有数了' }}
+          </p>
+          <el-button
+            v-if="hasFilter"
+            size="small"
+            @click="resetFilters"
+          >
+            清除筛选
+          </el-button>
+          <el-button v-else type="primary" size="small" @click="openCreate">
+            记一笔
+          </el-button>
+        </div>
+      </template>
       <el-table-column prop="occurred_at" label="时间" width="150">
         <template slot-scope="{ row }">{{ formatDateTime(row.occurred_at) }}</template>
       </el-table-column>
@@ -189,6 +209,15 @@ export default {
     filterCategories() {
       const scope = this.filters.type || 'expense'
       return this.$store.getters['categories/listOf'](scope)
+    },
+
+    // 空态文案要区分「筛出来是空的」和「本来就没记账」。
+    // 日期范围不算筛选条件：它由汇总卡的月份箭头驱动，属于「换个时间段看」，不是「筛得更窄」。
+    // 「没选分类」是空串不是 null（0 也不是有效分类，消费必须挂在具体分类上）。
+    hasFilter() {
+      const f = this.filters
+      const hasCategory = f.category_id !== '' && f.category_id !== null
+      return Boolean(f.keyword || f.type || hasCategory)
     }
   },
   created() {

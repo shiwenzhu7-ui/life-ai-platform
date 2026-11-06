@@ -107,9 +107,29 @@
       row-key="id"
       border
       stripe
-      empty-text="还没有待办"
       style="width: 100%"
     >
+      <!-- 空态分两种：加了筛选没结果（引导放宽），和一条都还没有（引导新建） -->
+      <template slot="empty">
+        <div class="empty-state">
+          <p class="empty-state__title">
+            {{ hasFilter ? '没有符合条件的待办' : '还没有待办' }}
+          </p>
+          <p class="empty-state__hint">
+            {{ hasFilter ? '试试放宽筛选条件，或者点下面清除筛选' : '记一件要做的事，到点会提醒你' }}
+          </p>
+          <el-button
+            v-if="hasFilter"
+            size="small"
+            @click="resetFilters"
+          >
+            清除筛选
+          </el-button>
+          <el-button v-else type="primary" size="small" @click="openCreate">
+            新建待办
+          </el-button>
+        </div>
+      </template>
       <el-table-column width="46" align="center">
         <!-- 勾选 = 完成。只做 todo ↔ done 二元切换；doing/cancelled 在 V1.0 没有界面入口 -->
         <template slot-scope="{ row }">
@@ -254,6 +274,17 @@ export default {
     // 分类下拉的选项来自 Vuex 缓存（dispatch 一次，10 分钟内复用）
     taskCategories() {
       return this.$store.getters['categories/listOf']('task')
+    },
+
+    // 空态文案要区分「筛出来是空的」和「本来就空的」——排序不算筛选条件。
+    // 注意 category_id 的「没选」是空串（不是 null），而 0 是有效值「未分类」，
+    // 所以不能用 `!== null` 判，也不能直接当布尔用。
+    hasFilter() {
+      const f = this.filters
+      const hasCategory = f.category_id !== '' && f.category_id !== null
+      return Boolean(
+        f.keyword || f.status.length || hasCategory || f.priority || f.due_range.length
+      )
     },
 
     // 下拉绑一个字符串，state 里仍分成 sort/order 两项（后端就是两个参数）

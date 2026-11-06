@@ -26,4 +26,22 @@ body {
 #app {
   height: 100%;
 }
+
+// 表格空态：待办的「没有符合条件的待办」和消费的「还没有记账」共用这一套
+.empty-state {
+  padding: 26px 0 10px;
+  text-align: center;
+
+  &__title {
+    margin: 0 0 6px;
+    font-size: 14px;
+    color: #606266;
+  }
+
+  &__hint {
+    margin: 0 0 14px;
+    font-size: 12px;
+    color: #909399;
+  }
+}
 </style>
