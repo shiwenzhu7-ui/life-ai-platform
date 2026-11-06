@@ -150,6 +150,14 @@ const emptyFilters = () => ({
   date_range: []
 })
 
+// 'YYYY-MM' → ['YYYY-MM-01', 'YYYY-MM-最后一天']。
+// 用「下个月第 0 天」拿月末，比自己判断 30/31/闰年 2 月稳。
+function monthRange(month) {
+  const [year, mon] = month.split('-').map(Number)
+  const last = new Date(year, mon, 0).getDate()
+  return [`${month}-01`, `${month}-${String(last).padStart(2, '0')}`]
+}
+
 export default {
   name: 'ExpensesView',
   components: { PaginationBar, ExpenseFormDialog, ExpenseSummary },
@@ -245,7 +253,10 @@ export default {
 
     resetFilters() {
       this.filters = emptyFilters()
+      // 重置要连汇总一起回到「本月」，否则列表清了、汇总还停在 10 月
+      this.month = ''
       this.handleFilterChange()
+      this.fetchSummary()
     },
 
     handlePageChange({ page, size }) {
@@ -293,6 +304,7 @@ export default {
     },
 
     // 翻月：用 Date 的「溢出归一」处理跨年（2026-01 往前一个月会得到 2025-12）
+    // 汇总切月份时列表一起切：否则用户看到「汇总变了、列表还是上个月的账」，会当成 bug。
     handleMonthShift(delta) {
       const base = this.month
         ? new Date(`${this.month}-01T00:00:00`)
@@ -300,12 +312,16 @@ export default {
       const target = new Date(base.getFullYear(), base.getMonth() + delta, 1)
       const month = String(target.getMonth() + 1).padStart(2, '0')
       this.month = `${target.getFullYear()}-${month}`
+      this.filters.date_range = monthRange(this.month)
+      this.handleFilterChange()
       this.fetchSummary()
     },
 
     // 回到当月：清空 month，让后端用默认值（省得前端自己算今天几号）
     handleMonthCurrent() {
       this.month = ''
+      this.filters.date_range = []
+      this.handleFilterChange()
       this.fetchSummary()
     },
 

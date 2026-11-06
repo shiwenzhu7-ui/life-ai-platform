@@ -2,9 +2,26 @@
   <div class="tasks">
     <div class="tasks__toolbar">
       <span class="tasks__hint">共 {{ total }} 条待办</span>
-      <el-button type="primary" size="small" icon="el-icon-plus" @click="openCreate">
-        新建待办
-      </el-button>
+      <div class="tasks__toolbar-right">
+        <!-- 排序不算「筛选」：它不改变取哪些行，只改变顺序，所以放在表格右上角 -->
+        <span class="tasks__sort-label">排序</span>
+        <el-select
+          v-model="sortValue"
+          class="tasks__sort"
+          size="small"
+          @change="handleFilterChange"
+        >
+          <el-option
+            v-for="item in sortOptions"
+            :key="item.value"
+            :label="item.label"
+            :value="item.value"
+          />
+        </el-select>
+        <el-button type="primary" size="small" icon="el-icon-plus" @click="openCreate">
+          新建待办
+        </el-button>
+      </div>
     </div>
 
     <!-- 筛选条：五个维度照 docs/页面设计.md §1.4 的接口映射表，后端参数早已就绪 -->
@@ -80,20 +97,6 @@
         unlink-panels
         @change="handleFilterChange"
       />
-
-      <el-select
-        v-model="sortValue"
-        class="tasks__filter tasks__filter--sort"
-        placeholder="排序"
-        @change="handleFilterChange"
-      >
-        <el-option
-          v-for="item in sortOptions"
-          :key="item.value"
-          :label="item.label"
-          :value="item.value"
-        />
-      </el-select>
 
       <el-button type="text" size="small" @click="resetFilters">重置</el-button>
     </div>
@@ -268,6 +271,8 @@ export default {
   created() {
     this.loadCategories()
     this.fetchData()
+    // 从首页 focus 列表点进来时带 ?task=<id>，直接打开那一条的编辑抽屉
+    this.openFromQuery()
   },
   methods: {
     formatDateTime,
@@ -382,6 +387,17 @@ export default {
       this.drawerVisible = true
     },
 
+    // 首页 focus 行点进来时走这里：读 ?task=<id> → 打开抽屉 → 把参数从地址栏抹掉。
+    // 抹掉是为了「关掉抽屉再刷新」不会又弹出来，也避免用户复制到一个带一次性参数的地址。
+    openFromQuery() {
+      const raw = this.$route.query.task
+      const id = Number(raw)
+      if (!raw || !Number.isInteger(id) || id <= 0) return
+      this.editingId = id
+      this.drawerVisible = true
+      this.$router.replace({ path: '/tasks' })
+    },
+
     onSaved() {
       this.fetchData()
     }
@@ -421,11 +437,21 @@ export default {
     &--date {
       width: 300px;
     }
+  }
 
-    // 排序的选项文字比「优先级」「分类」长，给宽一点免得截断
-    &--sort {
-      width: 170px;
-    }
+  &__toolbar-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  &__sort-label {
+    font-size: 13px;
+    color: #909399;
+  }
+
+  &__sort {
+    width: 170px;
   }
 
   &__desc {

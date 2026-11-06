@@ -4,7 +4,10 @@
     <p v-else-if="!overview" class="dash__hint">数据没取到，稍后再试。</p>
 
     <template v-else>
-      <p class="dash__greeting">{{ greeting }}，演示用户</p>
+      <p class="dash__greeting">
+        <span>{{ greeting }}，演示用户</span>
+        <span class="dash__date">{{ todayLabel }}</span>
+      </p>
 
       <div class="dash__cards">
         <!-- 左：待办概览 -->
@@ -58,7 +61,13 @@
         <p v-if="!focusTasks.length" class="focus__empty">今天没有待办，休息一下</p>
 
         <ul v-else class="focus">
-          <li v-for="row in focusTasks" :key="row.id" class="focus__row">
+          <li
+            v-for="row in focusTasks"
+            :key="row.id"
+            class="focus__row"
+            :title="`点击去待办页打开「${row.title}」`"
+            @click="openFocus(row)"
+          >
             <span class="focus__flag" :class="{ 'focus__flag--on': row.is_overdue }">
               {{ row.is_overdue ? '!' : '' }}
             </span>
@@ -112,13 +121,23 @@ function dayGap(from, to) {
   return Math.round((b - a) / 86400000)
 }
 
+const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六']
+
+// 「2026-11-06 星期五」——只用北京日期，和页面上所有相对时间同一套口径
+function todayLabel() {
+  const today = beijingToday()
+  const day = new Date(`${today}T00:00:00Z`).getUTCDay()
+  return `${today} 星期${WEEKDAYS[day]}`
+}
+
 export default {
   name: 'DashboardView',
   components: { OverviewCard, SparkBar },
   data() {
     return {
       loading: false,
-      overview: null
+      overview: null,
+      todayLabel: todayLabel()
     }
   },
   computed: {
@@ -152,6 +171,11 @@ export default {
     },
     go(path) {
       this.$router.push(path)
+    },
+    // 点 focus 行：带着 id 去待办页，由那边打开编辑抽屉。
+    // 用 query 而不是 store，是因为 query 刷新后还在，可以分享/收藏这个位置。
+    openFocus(row) {
+      this.$router.push({ path: '/tasks', query: { task: String(row.id) } })
     },
     // 后端返回的 due_at 固定带 +08:00，所以前 10 位就是北京日期、11-16 位就是北京时间
     beijingDate(iso) {
@@ -205,10 +229,19 @@ export default {
 }
 
 .dash__greeting {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
   margin: 0 0 16px;
   font-size: 18px;
   font-weight: 500;
   color: #303133;
+}
+
+.dash__date {
+  font-size: 13px;
+  font-weight: 400;
+  color: #909399;
 }
 
 .dash__cards {
@@ -306,6 +339,7 @@ export default {
   padding: 9px 6px;
   border-bottom: 1px solid #f7f8fa;
   font-size: 14px;
+  cursor: pointer;
   grid-template-columns: 16px 1fr 140px 96px;
 
   &:last-child {
@@ -313,7 +347,7 @@ export default {
   }
 
   &:hover {
-    background: #fafbfc;
+    background: #f5f7fa;
   }
 }
 

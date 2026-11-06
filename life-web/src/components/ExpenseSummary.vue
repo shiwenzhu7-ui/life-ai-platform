@@ -52,7 +52,7 @@
     <!-- 类别占比：V1.0 用横向条，V1.4 换 ECharts 饼图（见 docs/页面设计.md §1.5） -->
     <div class="expense-summary__cats">
       <p class="expense-summary__cats-title">类别占比</p>
-      <p v-if="!categories.length" class="expense-summary__empty">本月还没有支出记录</p>
+      <p v-if="!categories.length" class="expense-summary__empty">该月还没有支出记录</p>
       <div v-for="item in categories" :key="item.category_id" class="expense-summary__cat">
         <span class="expense-summary__cat-name">{{ item.category_name }}</span>
         <span class="expense-summary__cat-bar">
