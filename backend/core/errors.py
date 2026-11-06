@@ -13,6 +13,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,33 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     )
 
 
+# 框架自己抛的 HTTPException（路径没注册 → 404、方法不对 → 405）也要走统一错误体，
+# 否则前端会看到两套形状：{"code": ...} 与 FastAPI 默认的 {"detail": ...}。
+_HTTP_CODE_MAP = {
+    400: "BAD_REQUEST",
+    401: "UNAUTHORIZED",
+    403: "FORBIDDEN",
+    404: "NOT_FOUND",
+    405: "METHOD_NOT_ALLOWED",
+    409: "CONFLICT",
+}
+
+
+async def http_exception_handler(
+    request: Request, exc: StarletteHTTPException
+) -> JSONResponse:
+    code = _HTTP_CODE_MAP.get(exc.status_code, "HTTP_ERROR")
+    if exc.status_code == 404 and exc.detail in ("Not Found", "Not found"):
+        message = "接口不存在"  # 路由未注册，不是业务意义上的"资源不存在"
+    else:
+        message = str(exc.detail)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=_body(code, message),
+        headers=getattr(exc, "headers", None),
+    )
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     """在 app 上注册全部异常处理器。
 
@@ -83,6 +111,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     """
     app.add_exception_handler(AppError, app_error_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
 
 
