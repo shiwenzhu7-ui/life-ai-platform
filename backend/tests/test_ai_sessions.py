@@ -20,8 +20,7 @@ from core.config import settings
 from core.db import engine
 from core.deps import get_current_user_id
 from core.time import now_utc
-from modules.lifeweb.ai.chat_message import ChatMessage
-from modules.lifeweb.ai.chat_session import ChatSession
+from modules.lifeweb.ai.models import ChatMessage, ChatSession
 
 
 @contextmanager

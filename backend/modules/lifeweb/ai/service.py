@@ -32,8 +32,7 @@ from core.config import settings
 from core.errors import AppError, not_found
 from core.time import now_beijing, now_utc
 from modules.lifeweb.ai import crud
-from modules.lifeweb.ai.chat_message import ChatMessage
-from modules.lifeweb.ai.chat_session import ChatSession
+from modules.lifeweb.ai.models import ChatMessage, ChatSession
 from modules.lifeweb.ai.prompts import build_system_prompt
 from modules.lifeweb.ai.provider import LLMError, LLMProvider
 from modules.lifeweb.ai.schema import DEFAULT_TITLE
@@ -152,7 +151,7 @@ def _resolve_session(
 def _maybe_rewrite_title(session: ChatSession, message: str) -> None:
     """空会话的第一句话顺便当标题。
 
-    `chat_session.py:5` 约定的「首条用户消息落库后截前 30 字」就在这里做。
+    `models/chat_session.py:5` 约定的「首条用户消息落库后截前 30 字」就在这里做。
     只改「还没说过话 + 仍是默认标题」的会话：
     用户手动改过标题的（title != 默认）不能被覆盖。
     """

@@ -17,11 +17,11 @@ from pydantic import BaseModel, Field, field_validator
 
 from core.time import to_beijing_iso
 
-# 新建会话的默认标题。数据库列上也有 server_default="新对话"（chat_session.py:33），
+# 新建会话的默认标题。数据库列上也有 server_default="新对话"（models/chat_session.py:33），
 # 两处并存是故意的：这里管「走接口」，库默认管「绕过接口直接建行」（比如测试夹具）。
 DEFAULT_TITLE = "新对话"
 
-# 必须与 chat_message.CHAT_ROLES 一字不差 —— 模型里那份是数据库 ENUM 的镜像
+# 必须与 models/chat_message.py 的 CHAT_ROLES 一字不差 —— 模型里那份是数据库 ENUM 的镜像
 MessageRole = Literal["user", "assistant", "system", "tool"]
 
 

@@ -20,11 +20,9 @@ from conftest import API, new_session
 from app import app
 from core.config import settings
 from core.time import now_utc
-from modules.lifeweb.ai.chat_message import ChatMessage
-from modules.lifeweb.ai.chat_session import ChatSession
+from modules.lifeweb.ai.models import ChatMessage, ChatSession, UsageLog
 from modules.lifeweb.ai.provider import FakeProvider, LLMError, LLMProvider, LLMReply
 from modules.lifeweb.ai.router import get_provider
-from modules.lifeweb.ai.usage_log import UsageLog
 
 
 class _ErrorProvider(LLMProvider):

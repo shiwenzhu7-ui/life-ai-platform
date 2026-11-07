@@ -18,10 +18,8 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
 from core.time import now_utc
-from modules.lifeweb.ai.chat_message import ChatMessage
-from modules.lifeweb.ai.chat_session import ChatSession
+from modules.lifeweb.ai.models import ChatMessage, ChatSession, UsageLog
 from modules.lifeweb.ai.schema import DEFAULT_TITLE
-from modules.lifeweb.ai.usage_log import UsageLog
 from modules.shared.categories.model import Category
 
 
@@ -134,7 +132,7 @@ def list_messages(
     这里不再校验会话是否存在/是否软删 —— 调用方（router）先用
     get_session 挡过一道，挡不住就说明这层被绕过用了。
 
-    user_id 冗余过滤：chat_messages 自己带 user_id（chat_message.py:41），
+    user_id 冗余过滤：chat_messages 自己带 user_id（models/chat_message.py:41），
     多这一条条件，即使 session_id 被猜中也读不到别人的消息。
     """
     conds = [
