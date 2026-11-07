@@ -1,12 +1,16 @@
-"""AI 会话接口 —— 只做三件事，不含业务规则。
+"""AI 接口 —— 只做三件事，不含业务规则。
 
 1. 绑定并校验 HTTP 参数（Query / Body / Path）
 2. 注入 user_id（V1.0 固定演示用户；V1.2 换成 JWT 解析，本层不用改）
-3. 调 crud，把 ORM 对象转成响应 Schema
+3. 调 crud / service，把 ORM 对象转成响应 Schema
 
-五个接口分两类：
-    会话：新建 / 列表 / 改标题 / 软删
-    消息：只读（写消息是 A4 的事 —— 它要调模型、记 token，规则比 CRUD 重得多）
+接口分两类：
+    会话：新建 / 列表 / 改标题 / 软删（A3）
+    对话：发一句话拿回复（A4）；消息列表是只读（A3）
+
+两个 router 分开是因为路径前缀不同：`/ai/sessions` 与 `/ai`。
+为什么不是一个前缀 `/ai` 下全挂 —— 上一轮踩过：`/ai` + `/{session_id}`
+会把 `/ai/sessions` 抢走（405）。路径前缀越具体，越不容易互相吃掉。
 """
 
 from fastapi import APIRouter, Body, Depends, Query
@@ -15,17 +19,25 @@ from sqlalchemy.orm import Session
 from core.config import settings
 from core.db import get_db
 from core.deps import get_current_user_id
-from core.errors import not_found
-from modules.lifeweb.ai import crud
+from core.errors import AppError, not_found
+from modules.lifeweb.ai import crud, service
+from modules.lifeweb.ai.provider import LLMError, LLMProvider, build_provider
 from modules.lifeweb.ai.schema import (
+    ChatRequest,
+    ChatResponse,
     MessageOut,
     SessionCreate,
     SessionOut,
     SessionUpdate,
+    UsageOut,
 )
 from modules.shared.pagination import Page
 
-router = APIRouter(prefix="/ai/sessions", tags=["AI 助手"])
+session_router = APIRouter(prefix="/ai/sessions", tags=["AI 助手"])
+chat_router = APIRouter(prefix="/ai", tags=["AI 助手"])
+
+# lifeweb/__init__.py 遍历它挂载；加新 router 只改这一行
+routers = (session_router, chat_router)
 
 
 def _get_or_404(db: Session, user_id: int, session_id: int):
@@ -42,7 +54,7 @@ def _get_or_404(db: Session, user_id: int, session_id: int):
     return session
 
 
-@router.post("", response_model=SessionOut, status_code=201, summary="新建会话")
+@session_router.post("", response_model=SessionOut, status_code=201, summary="新建会话")
 def create_session(
     payload: SessionCreate | None = Body(default=None),
     user_id: int = Depends(get_current_user_id),
@@ -63,7 +75,7 @@ def create_session(
     return SessionOut.from_model(session)
 
 
-@router.get("", response_model=Page[SessionOut], summary="会话列表")
+@session_router.get("", response_model=Page[SessionOut], summary="会话列表")
 def list_sessions(
     page: int = Query(default=1, ge=1, description="页码，从 1 开始"),
     size: int = Query(default=20, ge=1, le=100, description="每页条数"),
@@ -78,7 +90,7 @@ def list_sessions(
     return Page.create([SessionOut.from_model(row) for row in rows], total, page, size)
 
 
-@router.get(
+@session_router.get(
     "/{session_id}/messages", response_model=Page[MessageOut], summary="会话消息"
 )
 def list_messages(
@@ -100,7 +112,7 @@ def list_messages(
     return Page.create([MessageOut.from_model(row) for row in rows], total, page, size)
 
 
-@router.patch("/{session_id}", response_model=SessionOut, summary="改会话标题")
+@session_router.patch("/{session_id}", response_model=SessionOut, summary="改会话标题")
 def update_session_title(
     session_id: int,
     payload: SessionUpdate,
@@ -117,7 +129,7 @@ def update_session_title(
     return SessionOut.from_model(session)
 
 
-@router.delete("/{session_id}", status_code=204, summary="删除会话")
+@session_router.delete("/{session_id}", status_code=204, summary="删除会话")
 def delete_session(
     session_id: int,
     user_id: int = Depends(get_current_user_id),
@@ -133,3 +145,56 @@ def delete_session(
     消息不跟着删：留给 A4/A6 做用量与历史复盘。
     """
     crud.soft_delete_session(db, _get_or_404(db, user_id, session_id))
+
+
+# ---------- 对话（A4） ----------
+
+
+def get_provider() -> LLMProvider:
+    """模型提供方依赖。
+
+    写成依赖而不是在函数里直接 `build_provider()`，是为了测试能整体替换：
+    `app.dependency_overrides[get_provider] = lambda: FakeProvider([...])`，
+    业务代码一行不改，测试也不联网。
+
+    没配 key 时 build_provider 抛 LLMError —— 在这里转成 AppError，
+    否则会走 500 兜底，前端只看到「服务器内部错误」，不知道是配置问题。
+    """
+    try:
+        return build_provider()
+    except LLMError as exc:
+        raise AppError(exc.code, exc.message, exc.status_code) from exc
+
+
+@chat_router.post("/chat", response_model=ChatResponse, summary="发一句话，拿回复")
+def chat(
+    payload: ChatRequest,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+    provider: LLMProvider = Depends(get_provider),
+) -> ChatResponse:
+    """把一句话发给模型，落库并返回回复。
+
+    `session_id` 省略时自动新建会话（标题取这句话的前 30 字）。
+    失败不返回 200 + 假回复：模型超时回 504、限流 429、没配 key 503 ——
+    前端据此提示「稍后重试」，而不是把错误当成模型的正式回答展示。
+    """
+    turn = service.chat(
+        db,
+        user_id,
+        session_id=payload.session_id,
+        message=payload.message,
+        provider=provider,
+    )
+    return ChatResponse(
+        session_id=turn.session.id,
+        message_id=turn.assistant_message.id,
+        reply=turn.assistant_message.content or "",
+        usage=UsageOut(
+            token_in=turn.token_in,
+            token_out=turn.token_out,
+            latency_ms=turn.latency_ms,
+            model=turn.model,
+            cost_estimate=turn.cost_estimate,
+        ),
+    )

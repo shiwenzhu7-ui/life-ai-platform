@@ -127,3 +127,53 @@ class MessageOut(BaseModel):
             error_message=message.error_message,
             created_at=to_beijing_iso(message.created_at),
         )
+
+
+class ChatRequest(BaseModel):
+    """发一句话的请求体。
+
+    `session_id` 不传 = 新建一个会话（返回里带新 id，前端记住它继续聊）。
+    传了就是往那个会话里追加；不属于自己 / 已删除 → 404。
+    """
+
+    session_id: int | None = Field(
+        default=None, ge=1, description="会话 ID；不传则自动新建一个会话"
+    )
+    message: str = Field(min_length=1, max_length=2000, description="用户说的话")
+
+    @field_validator("message")
+    @classmethod
+    def message_not_blank(cls, value: str) -> str:
+        # 纯空格长度也是 1，min_length 拦不住；strip 之后再判一次
+        value = value.strip()
+        if not value:
+            raise ValueError("消息不能为空")
+        return value
+
+
+class UsageOut(BaseModel):
+    """这次调用的用量 —— 前端可以在气泡下面显示「320 tokens · 0.9s」。"""
+
+    token_in: int = Field(default=0, description="输入 token 数")
+    token_out: int = Field(default=0, description="输出 token 数")
+    latency_ms: int = Field(default=0, description="调用耗时（毫秒）")
+    model: str | None = Field(
+        default=None,
+        description="实际回答的模型名（以服务端响应为准，可能与请求的 model 不同）",
+    )
+    cost_estimate: float = Field(
+        default=0.0, description="费用估算（元）；未配置单价时恒为 0"
+    )
+
+
+class ChatResponse(BaseModel):
+    """一问一答的响应。
+
+    `message_id` 是**助手消息**的 id：前端要重试/引用时用它，
+    不用再拉一次消息列表。
+    """
+
+    session_id: int
+    message_id: int
+    reply: str = Field(description="模型回复正文；只调工具时可能为空串（A5 起）")
+    usage: UsageOut

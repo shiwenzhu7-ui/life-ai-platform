@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     # OpenAI 兼容端点；DeepSeek 官方也吃这个前缀
     llm_base_url: str = "https://api.deepseek.com"
     llm_model: str = "deepseek-chat"
+    # 计价单价（元 / 百万 token），用来算 ai_usage_logs.cost_estimate。
+    # 默认 0 = 只记 token 不估钱：没核实过官网价目表之前，写一个拍脑袋的数字
+    # 比记 0 更糟（看起来像账单，实际是猜的）。要用就按官网当天价格填 .env。
+    llm_price_in_per_mtok: float = 0.0
+    llm_price_out_per_mtok: float = 0.0
 
     @property
     def llm_ready(self) -> bool:
