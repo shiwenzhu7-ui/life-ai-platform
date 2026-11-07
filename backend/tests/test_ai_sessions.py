@@ -212,6 +212,37 @@ def test_messages_are_ordered_by_id_and_paginated(client, db):
     assert [item["content"] for item in second["items"]] == ["第三句"]
 
 
+def test_messages_order_desc_returns_newest_first(client, db):
+    """聊天窗口用 desc：第一页就该是最新几条，而不是三个月前的开场白。"""
+    session = _make_session(db)
+    for content in ("第一句", "第二句", "第三句"):
+        _make_message(db, session.id, role="user", content=content)
+
+    first = client.get(
+        f"{API}/ai/sessions/{session.id}/messages",
+        params={"page": 1, "size": 2, "order": "desc"},
+    ).json()
+    second = client.get(
+        f"{API}/ai/sessions/{session.id}/messages",
+        params={"page": 2, "size": 2, "order": "desc"},
+    ).json()
+
+    assert [item["content"] for item in first["items"]] == ["第三句", "第二句"]
+    assert first["total"] == 3
+    assert first["pages"] == 2
+    assert [item["content"] for item in second["items"]] == ["第一句"]
+
+
+def test_messages_rejects_unknown_order(client, db):
+    session = _make_session(db)
+
+    res = client.get(
+        f"{API}/ai/sessions/{session.id}/messages", params={"order": "sideways"}
+    )
+
+    assert res.status_code == 422
+
+
 def test_messages_of_missing_session_404(client):
     assert client.get(f"{API}/ai/sessions/999999/messages").status_code == 404
 

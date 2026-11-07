@@ -13,6 +13,8 @@
 会把 `/ai/sessions` 抢走（405）。路径前缀越具体，越不容易互相吃掉。
 """
 
+from typing import Literal
+
 from fastapi import APIRouter, Body, Depends, Query
 from sqlalchemy.orm import Session
 
@@ -97,17 +99,25 @@ def list_messages(
     session_id: int,
     page: int = Query(default=1, ge=1, description="页码，从 1 开始"),
     size: int = Query(default=50, ge=1, le=100, description="每页条数"),
+    order: Literal["asc", "desc"] = Query(
+        default="asc",
+        description="asc=最早在前（默认）；desc=最新在前，聊天窗口要这个",
+    ),
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ) -> Page[MessageOut]:
-    """按发生顺序（id 升序）返回某会话的消息。
+    """返回某会话的消息。
+
+    默认 asc（id 升序，最早在前）—— 兼容 A3 已交付的行为。
+    `order=desc` 时返回「最新在前」，page=1 就是最近 size 条：
+    聊天窗口不能一打开先给人看三个月前的开场白。
 
     先过 _get_or_404：会话不存在 / 已软删 / 不是我的，一律 404，
     不会返回一个「空列表」让人以为会话还在。
     """
     _get_or_404(db, user_id, session_id)
     rows, total = crud.list_messages(
-        db, user_id, session_id, page=page, size=size
+        db, user_id, session_id, page=page, size=size, order=order
     )
     return Page.create([MessageOut.from_model(row) for row in rows], total, page, size)
 

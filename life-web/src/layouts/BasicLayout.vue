@@ -1,6 +1,6 @@
 <template>
   <el-container class="layout">
-    <!-- 左侧导航：V1.0 只有三页，等 V1.1 加预算/购物再往这里加 item -->
+    <!-- 左侧导航：V1.0 三页 + V1.1 的 AI 助手；预算/购物等后续再往这里加 item -->
     <el-aside width="200px" class="layout__aside">
       <div class="layout__brand">
         <span class="layout__brand-text">LifeAI</span>
@@ -48,7 +48,8 @@
 const MENUS = [
   { path: '/', title: '首页', icon: 'el-icon-s-home' },
   { path: '/tasks', title: '待办', icon: 'el-icon-s-order' },
-  { path: '/expenses', title: '消费', icon: 'el-icon-s-finance' }
+  { path: '/expenses', title: '消费', icon: 'el-icon-s-finance' },
+  { path: '/ai', title: 'AI 助手', icon: 'el-icon-chat-dot-round' }
 ]
 
 export default {

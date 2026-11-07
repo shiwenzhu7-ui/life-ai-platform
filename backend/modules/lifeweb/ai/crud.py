@@ -13,6 +13,7 @@
 """
 
 from datetime import datetime
+from typing import Literal
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
@@ -123,8 +124,13 @@ def list_messages(
     *,
     page: int = 1,
     size: int = 50,
+    order: Literal["asc", "desc"] = "asc",
 ) -> tuple[list[ChatMessage], int]:
     """某会话的消息，按发生顺序（id 升序）返回。
+
+    `order="desc"` 时改成「最新在前」，page=1 就是最近 N 条 ——
+    聊天窗口要的就是这个：不能翻开是三个月前的开场白。
+    前端拿到 desc 结果后反转显示，就能保持「旧 → 新」的视觉顺序。
 
     为什么按 id 而不是 created_at：自增 id 天然单调，
     同一秒内的两条消息也不会因为时间戳相同而错序。
@@ -142,7 +148,8 @@ def list_messages(
     base = select(ChatMessage).where(*conds)
 
     total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
-    stmt = base.order_by(ChatMessage.id.asc()).offset((page - 1) * size).limit(size)
+    direction = ChatMessage.id.desc() if order == "desc" else ChatMessage.id.asc()
+    stmt = base.order_by(direction).offset((page - 1) * size).limit(size)
     return list(db.scalars(stmt).all()), int(total)
 
 
