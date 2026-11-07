@@ -108,7 +108,7 @@
 
 <script>
 import { chat, createSession, listMessages, listSessions } from '@/api/ai'
-import { formatDateTime } from '@/utils/format'
+import { formatDateTime as fmtDateTime } from '@/utils/format'
 
 export default {
   name: 'AiView',
@@ -159,6 +159,9 @@ export default {
         })
         this.messages = (page.items || []).slice().reverse()
         this.scrollToBottom()
+      } catch (err) {
+        // 转圈必须停，还得告诉人为什么停了 —— 否则用户只看到永远转的圈
+        this.errorText = err.message || '消息加载失败'
       } finally {
         this.loadingMessages = false
       }
@@ -261,8 +264,14 @@ export default {
       this.handleSend()
     },
 
+    // 模板里只能调 methods/computed 上的东西，直接 import 的函数挂不上，
+    // 所以这里给模板开一个同名入口（内部用别名调，避免自己递归自己）
+    formatDateTime(value) {
+      return fmtDateTime(value)
+    },
+
     formatSessionTime(session) {
-      return formatDateTime(session.last_message_at || session.created_at)
+      return fmtDateTime(session.last_message_at || session.created_at)
     },
 
     scrollToBottom() {
