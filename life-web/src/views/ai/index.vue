@@ -73,6 +73,7 @@
         <footer class="ai__composer">
           <p v-if="errorText" class="ai__error">{{ errorText }}</p>
           <el-input
+            ref="composer"
             v-model="input"
             type="textarea"
             :rows="2"
@@ -181,6 +182,7 @@ export default {
       this.messages = []
       this.errorText = ''
       this.loadMessages(sessionId)
+      this.focusComposer()
     },
 
     // 先建空会话再选中：左栏立刻多一行，用户知道点到了
@@ -193,6 +195,7 @@ export default {
         this.activeId = session.id
         this.messages = []
         this.errorText = ''
+        this.focusComposer()
       } finally {
         this.creating = false
       }
@@ -246,6 +249,7 @@ export default {
         this.errorText = err.message || '发送失败'
       } finally {
         this.sending = false
+        this.focusComposer()
       }
     },
 
@@ -265,6 +269,14 @@ export default {
       this.$nextTick(() => {
         const el = this.$refs.messagesEl
         if (el) el.scrollTop = el.scrollHeight
+      })
+    },
+
+    // 处理完一件事就把焦点放回输入框，省得每次都要点一下
+    focusComposer() {
+      this.$nextTick(() => {
+        const el = this.$refs.composer
+        if (el && el.focus) el.focus()
       })
     }
   }

@@ -20,6 +20,8 @@ module.exports = defineConfig({
   // 也不用在前端写死后端端口（后端实际跑在 8010，文档里写的是 8000）。
   devServer: {
     port: 8080,
+    // history 模式下直接访问 /ai、/tasks 也要能打开（否则只能从首页点进来）
+    historyApiFallback: true,
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:8010',
