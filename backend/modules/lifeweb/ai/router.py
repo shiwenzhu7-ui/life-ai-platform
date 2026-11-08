@@ -121,12 +121,20 @@ def list_messages(
 
     先过 _get_or_404：会话不存在 / 已软删 / 不是我的，一律 404，
     不会返回一个「空列表」让人以为会话还在。
+
+    卡片也一起带回来（A5 第 6 步）：每条带 `pending_action` 的消息，
+    前端就能在刷新后原样画出确认卡；**一次批量查**，不给列表位加 N+1。
+    这里**不动过期状态** —— 列表是读路径，不能因为「翻开历史」顺手写库；
+    过期的卡照实返回 `status=pending`，用户真去点时由
+    `pending.get_pending` 置 expired 并回 410。
     """
     _get_or_404(db, user_id, session_id)
     rows, total = crud.list_messages(
         db, user_id, session_id, page=page, size=size, order=order
     )
-    return Page.create([MessageOut.from_model(row) for row in rows], total, page, size)
+    cards = crud.pending_by_message(db, user_id, [row.id for row in rows])
+    items = [MessageOut.from_model(row, cards.get(row.id)) for row in rows]
+    return Page.create(items, total, page, size)
 
 
 @session_router.patch("/{session_id}", response_model=SessionOut, summary="改会话标题")
@@ -206,14 +214,8 @@ def chat(
     assistant = turn.assistant_message
     pending = None
     if turn.pending is not None:
-        pending = PendingActionOut(
-            id=turn.pending.id,
-            action_type=turn.pending.action_type,
-            expires_at=(
-                to_beijing_iso(turn.pending.expires_at) if turn.pending.expires_at else ""
-            ),
-            preview=turn.pending.payload or {},
-        )
+        # 刚建出来的卡一定是 pending，状态由 from_model 带出，两处响应字段一致
+        pending = PendingActionOut.from_model(turn.pending)
     if assistant.status == "failed":
         # 这一轮模型想调工具、参数始终不合格：业务上没办成，不能用 200 糊过去。
         # 消息已经落库（刷新能看到 + 失败原因），前端应提示「稍后重试」。

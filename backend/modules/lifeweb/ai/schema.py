@@ -89,11 +89,50 @@ class SessionOut(BaseModel):
         )
 
 
+class PendingActionOut(BaseModel):
+    """待确认动作 —— 前端据此渲染确认卡片。
+
+    存在即表示「模型想改数据，但还没改」。前端必须渲染卡片等用户点头，
+    **此时任务/账本里没有任何新记录**（A5 的安全底线）。
+
+    `status` 在这里出现（而不是只在 `ActionOut` 里）是为了让**刷新页面后的卡片**
+    也能显示成「已创建 / 已取消 / 已过期」而不是一堆可点的按钮 ——
+    消息列表接口会把它一起带回来（见 `MessageOut.pending_action`）。
+    """
+
+    id: int
+    action_type: str = Field(description="create_task / create_expense / …")
+    status: str = Field(
+        default="pending", description="pending / confirmed / cancelled / expired"
+    )
+    expires_at: str | None = Field(
+        default=None, description="过期时间（北京时间 ISO）；过期后点确认返回 410"
+    )
+    preview: dict[str, Any] = Field(
+        default_factory=dict,
+        description="给卡片直接显示的内容，已含分类名与可读时间",
+    )
+
+    @classmethod
+    def from_model(cls, action) -> "PendingActionOut":
+        return cls(
+            id=action.id,
+            action_type=action.action_type,
+            status=action.status,
+            expires_at=to_beijing_iso(action.expires_at),
+            preview=action.payload or {},
+        )
+
+
 class MessageOut(BaseModel):
     """消息列表的一行 —— 一句话，或一次工具往返。
 
     tool_calls / tool_result 原样透出，不裁剪：
     前端要靠它们画「正在查待办…」这种过程卡片，裁掉就得再改回来。
+
+    `pending_action` 是**这条助手消息产生的那张卡**（A5 第 6 步）。
+    没有它的话，刷新页面后前端根本不知道哪条消息曾经有过卡片 ——
+    草稿还躺在 `ai_pending_actions` 里，界面上却凭空消失了。
     """
 
     id: int
@@ -111,9 +150,15 @@ class MessageOut(BaseModel):
     status: str = Field(default="ok", description="ok / failed")
     error_message: str | None = Field(default=None, description="失败原因，最多 500 字")
     created_at: str | None
+    pending_action: PendingActionOut | None = Field(
+        default=None,
+        description="这条助手消息产生的待确认卡片；没有则为 null（A5 第 6 步）",
+    )
 
     @classmethod
-    def from_model(cls, message) -> "MessageOut":
+    def from_model(cls, message, pending=None) -> "MessageOut":
+        """`pending` 由调用方批量查好传进来 —— 让 ORM 对象自己反向查表
+        会在列表循环里触发 N+1 查询，而且把查询职责塞进了 schema 层。"""
         return cls(
             id=message.id,
             role=message.role,
@@ -126,6 +171,9 @@ class MessageOut(BaseModel):
             status=message.status,
             error_message=message.error_message,
             created_at=to_beijing_iso(message.created_at),
+            pending_action=(
+                PendingActionOut.from_model(pending) if pending is not None else None
+            ),
         )
 
 
@@ -163,22 +211,6 @@ class UsageOut(BaseModel):
     )
     cost_estimate: float = Field(
         default=0.0, description="费用估算（元）；未配置单价时恒为 0"
-    )
-
-
-class PendingActionOut(BaseModel):
-    """待确认动作 —— 前端据此渲染确认卡片。
-
-    存在即表示「模型想改数据，但还没改」。前端必须渲染卡片等用户点头，
-    **此时任务/账本里没有任何新记录**（A5 的安全底线）。
-    """
-
-    id: int
-    action_type: str = Field(description="create_task / create_expense / …")
-    expires_at: str = Field(description="过期时间（北京时间 ISO）；过期后点确认返回 410")
-    preview: dict[str, Any] = Field(
-        default_factory=dict,
-        description="给卡片直接显示的内容，已含分类名与可读时间",
     )
 
 

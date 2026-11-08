@@ -19,7 +19,12 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
 from core.time import now_utc
-from modules.lifeweb.ai.models import ChatMessage, ChatSession, UsageLog
+from modules.lifeweb.ai.models import (
+    ChatMessage,
+    ChatSession,
+    PendingAction,
+    UsageLog,
+)
 from modules.lifeweb.ai.schema import DEFAULT_TITLE
 from modules.shared.categories.model import Category
 
@@ -151,6 +156,34 @@ def list_messages(
     direction = ChatMessage.id.desc() if order == "desc" else ChatMessage.id.asc()
     stmt = base.order_by(direction).offset((page - 1) * size).limit(size)
     return list(db.scalars(stmt).all()), int(total)
+
+
+def pending_by_message(
+    db: Session, user_id: int, message_ids: list[int]
+) -> dict[int, PendingAction]:
+    """这一页消息里，哪些产生过待确认卡片 —— `{message_id: PendingAction}`。
+
+    **一次查完**，不在列表循环里逐条查：50 条消息就是 50 次往返，
+    消息列表是聊天页每次打开都要调的位置，不能这么花。
+
+    不按 status 过滤：已确认 / 已取消 / 已过期的也要带回去 ——
+    卡片刷新后应该显示成「已创建」而不是消失。
+
+    一张助手消息目前最多挂一张卡（`MAX_DRAFTS_PER_REPLY=1`），所以直接按
+    message_id 建字典；若将来放宽到多张，这里要改成 `dict[int, list[PendingAction]]`
+    （按 id 升序覆盖，最后留下的是最新那张）。
+    """
+    if not message_ids:
+        return {}
+    rows = db.scalars(
+        select(PendingAction)
+        .where(
+            PendingAction.user_id == user_id,
+            PendingAction.message_id.in_(message_ids),
+        )
+        .order_by(PendingAction.id.asc())
+    ).all()
+    return {row.message_id: row for row in rows}
 
 
 # ---------- A4：发消息走写路径 ----------

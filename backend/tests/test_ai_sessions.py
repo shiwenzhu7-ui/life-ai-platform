@@ -11,6 +11,7 @@
 
 from contextlib import contextmanager
 from datetime import timedelta
+import uuid
 
 from conftest import API
 from sqlalchemy.orm import Session
@@ -20,7 +21,7 @@ from core.config import settings
 from core.db import engine
 from core.deps import get_current_user_id
 from core.time import now_utc
-from modules.lifeweb.ai.models import ChatMessage, ChatSession
+from modules.lifeweb.ai.models import ChatMessage, ChatSession, PendingAction
 
 
 @contextmanager
@@ -307,3 +308,117 @@ def test_delete_twice_returns_404(client, db):
 
 def test_delete_missing_session_404(client):
     assert client.delete(f"{API}/ai/sessions/999999").status_code == 404
+
+
+# ---------- A5 第 6 步：消息列表带上确认卡片 ----------
+
+
+def _make_pending(
+    db: Session,
+    *,
+    session_id: int,
+    message_id: int,
+    user_id: int = 1,
+    status: str = "pending",
+    minutes: int = 30,
+) -> PendingAction:
+    """造一张卡。`minutes` 可以是负数，用来造「已经过期但还没被置位」的行。"""
+    action = PendingAction(
+        user_id=user_id,
+        session_id=session_id,
+        message_id=message_id,
+        action_type="create_task",
+        payload={
+            "title": "去超市买牛奶",
+            "priority": "medium",
+            "priority_text": "中",
+            "category_id": 18,
+            "category_name": "购物",
+            "due_at_text": "2026-11-14 15:00（周六）",
+        },
+        status=status,
+        idempotency_key=str(uuid.uuid4()),
+        expires_at=now_utc() + timedelta(minutes=minutes),
+    )
+    db.add(action)
+    db.commit()
+    db.refresh(action)
+    return action
+
+
+def test_messages_carry_pending_action(client, db):
+    """刷新页面的关键：草稿还在库里，界面就得能把卡片原样画出来。
+
+    没有这个字段的话，用户关掉页面再打开，卡片会凭空消失 ——
+    待办没建成，用户也不知道自己还有一张没点的卡。
+    """
+    session = _make_session(db)
+    question = _make_message(db, session.id, role="user", content="提醒我买牛奶")
+    answer = _make_message(db, session.id, role="assistant", content="我整理了一条待办，请你确认。")
+    card = _make_pending(db, session_id=session.id, message_id=answer.id)
+
+    items = client.get(f"{API}/ai/sessions/{session.id}/messages").json()["items"]
+    by_id = {item["id"]: item for item in items}
+
+    # 用户那条消息没有卡
+    assert by_id[question.id]["pending_action"] is None
+
+    pending = by_id[answer.id]["pending_action"]
+    assert pending["id"] == card.id
+    assert pending["action_type"] == "create_task"
+    assert pending["status"] == "pending"
+    # 带 +08:00 的 ISO 字符串，和 ChatResponse 里那张卡同一个格式
+    assert pending["expires_at"].endswith("+08:00")
+    # preview 原样透出，含可读文本 —— 前端直接显示，不再自己算时区
+    assert pending["preview"]["title"] == "去超市买牛奶"
+    assert pending["preview"]["due_at_text"] == "2026-11-14 15:00（周六）"
+    assert pending["preview"]["category_name"] == "购物"
+
+
+def test_messages_carry_resolved_cards_without_touching_status(client, db):
+    """已确认 / 已取消 / 已过期的卡也要带回来，且**读列表不改状态**。
+
+    前半句：卡片该显示成「已创建」，而不是消失或变成可点的按钮。
+    后半句：列表是读路径，不能因为「翻开历史」就顺手写库 ——
+    过期的行照实返回 status=pending，用户真去点时由
+    pending.get_pending 置 expired 并回 410。
+    """
+    session = _make_session(db)
+    confirmed_msg = _make_message(db, session.id, role="assistant", content="已创建")
+    expired_msg = _make_message(db, session.id, role="assistant", content="这张已经放凉了")
+
+    confirmed = _make_pending(
+        db, session_id=session.id, message_id=confirmed_msg.id, status="confirmed"
+    )
+    stale = _make_pending(
+        db, session_id=session.id, message_id=expired_msg.id, minutes=-1
+    )
+
+    items = client.get(f"{API}/ai/sessions/{session.id}/messages").json()["items"]
+    by_id = {item["id"]: item for item in items}
+
+    assert by_id[confirmed_msg.id]["pending_action"]["status"] == "confirmed"
+    # 过期行没被列表接口偷偷改掉
+    assert by_id[expired_msg.id]["pending_action"]["status"] == "pending"
+
+    with Session(engine) as fresh:
+        assert fresh.get(PendingAction, confirmed.id).status == "confirmed"
+        assert fresh.get(PendingAction, stale.id).status == "pending"
+
+
+def test_other_users_cards_are_not_leaked(client, db):
+    """别人的卡不能挂在别人的消息上跟着返回（依赖消息本身已按 user_id 过滤）。"""
+    session = _make_session(db)
+    answer = _make_message(db, session.id, role="assistant", content="别人的卡")
+
+    with _acting_as(2):
+        _make_pending(db, session_id=session.id, message_id=answer.id, user_id=2)
+
+    # 用账号 2 的身份读：会话 1 的消息一律 404，不走「空列表」这条路
+    with _acting_as(2):
+        assert client.get(f"{API}/ai/sessions/{session.id}/messages").status_code == 404
+
+    # 账号 1 读自己的会话：消息在，但挂在它上面的那张卡属于账号 2，不能被带出来
+    items = client.get(f"{API}/ai/sessions/{session.id}/messages").json()["items"]
+    assert items[0]["content"] == "别人的卡"
+    assert items[0]["pending_action"] is None
