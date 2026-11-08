@@ -22,12 +22,14 @@ from core.config import settings
 from core.db import get_db
 from core.deps import get_current_user_id
 from core.errors import AppError, not_found
+from core.time import to_beijing_iso
 from modules.lifeweb.ai import crud, service
 from modules.lifeweb.ai.provider import LLMError, LLMProvider, build_provider
 from modules.lifeweb.ai.schema import (
     ChatRequest,
     ChatResponse,
     MessageOut,
+    PendingActionOut,
     SessionCreate,
     SessionOut,
     SessionUpdate,
@@ -196,10 +198,26 @@ def chat(
         message=payload.message,
         provider=provider,
     )
+    assistant = turn.assistant_message
+    pending = None
+    if turn.pending is not None:
+        pending = PendingActionOut(
+            id=turn.pending.id,
+            action_type=turn.pending.action_type,
+            expires_at=(
+                to_beijing_iso(turn.pending.expires_at) if turn.pending.expires_at else ""
+            ),
+            preview=turn.pending.payload or {},
+        )
+    if assistant.status == "failed":
+        # 这一轮模型想调工具、参数始终不合格：业务上没办成，不能用 200 糊过去。
+        # 消息已经落库（刷新能看到 + 失败原因），前端应提示「稍后重试」。
+        raise AppError("MALFORMED_TOOL_ARGS", service.MALFORMED_REASON, 502)
     return ChatResponse(
         session_id=turn.session.id,
-        message_id=turn.assistant_message.id,
-        reply=turn.assistant_message.content or "",
+        message_id=assistant.id,
+        reply=assistant.content or "",
+        pending_action=pending,
         usage=UsageOut(
             token_in=turn.token_in,
             token_out=turn.token_out,

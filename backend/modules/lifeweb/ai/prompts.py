@@ -1,8 +1,9 @@
-"""系统提示词 —— A4 只注入「时间 + 分类 + 说话方式」。
+"""系统提示词 —— 时间 + 分类 + 工具规则 + 说话方式。
 
-依据 `docs/AI设计.md:72` 的骨架，但**删掉了工具相关的规则**：
-A4 还没有工具，写「涉及写入时调用 create_* 工具」只会让模型**假装**已经保存，
-用户以为待办建好了、实际库里一条都没有。等 A5 接上工具再把这半段加回来。
+A4 只注入「时间 + 分类 + 说话方式」，因为那时还没有工具：写「涉及写入时调用
+create_* 工具」只会让模型**假装**已经保存，用户以为待办建好了、库里一条都没有。
+A5 第 4 步接上工具后，那半段规则加回来了（见 TOOL_RULES），措辞强调
+「你只是提议，用户确认之后才会真正写入」。
 
 为什么单独一个文件而不是写在 service.py 里：
 提示词会被反复改（换措辞、加规则），改它不该碰业务逻辑；而且测试可以单独
@@ -17,7 +18,7 @@ from typing import Mapping, Sequence
 from core.time import BEIJING
 
 # 只把和「用户会提到的四类东西」相关的域写进提示词。
-# diet / exercise / mood 暂不注入：A4 没有对应工具，提了也没有落点。
+# diet / exercise / mood 暂不注入：还没有对应工具，提了也没有落点。
 CATEGORY_LABELS: dict[str, str] = {
     "task": "待办",
     "expense": "支出",
@@ -26,6 +27,21 @@ CATEGORY_LABELS: dict[str, str] = {
 }
 
 _WEEKDAYS = "一二三四五六日"
+
+# 工具规则（A5 第 4 步接入）。四条都对应一个真实的失败模式：
+#
+#   1. 只提议不宣称 —— 模型最常见的错误是回「已经帮你记好了」，用户就不点确认了
+#   2. 一次一件事   —— 模型会一次交多个 create_task，而 MAX_DRAFTS_PER_REPLY=1，
+#                      多出来的会被静默丢弃，得让它自己先问清楚
+#   3. 时间带时区   —— 不带 +08:00 的时间会被 action_schema 拒掉，整张卡直接没了
+#   4. 拿不准就问   —— 比凭空补一个默认时间好：用户看卡片时能看出对不对
+TOOL_RULES = (
+    "你可以通过调用工具帮用户创建待办，但**用户点确认之前，任何数据都不会被写入**。",
+    "1. 调用工具时说「我整理了一条待办，请你确认」，不要声称已经保存、已完成。",
+    "2. 一次只处理一件事。用户一句话里说了多件事，先办第一件，其余的问他还要不要办。",
+    "3. 时间必须写成带时区的 ISO8601，例如 2026-11-09T15:00:00+08:00；没说时间就不要猜。",
+    "4. 标题、时间、分类任何一项拿不准，先问一句，不要自己补。",
+)
 
 
 def _format_now(now: datetime) -> str:
@@ -42,12 +58,17 @@ def _format_now(now: datetime) -> str:
 def build_system_prompt(
     now: datetime,
     categories: Mapping[str, Sequence[str]] | None = None,
+    *,
+    tools_enabled: bool = True,
 ) -> str:
     """拼系统提示词。
 
     :param now: 带时区的当前时间（`core.time.now_beijing()`）
     :param categories: {scope: [分类名]}，来自 categories 表；
         空表或 None 时不写分类段 —— 编一份假分类比不写更糟。
+    :param tools_enabled: 这次请求是否真的带了 tools。**两处必须一致**：
+        提示词说「你可以调用工具」而请求里没有 tools，模型只能假装调用
+        （返回一段假 JSON）；反过来请求带了 tools 却不说规则，它会滥用。
     """
     lines = [
         "你是 LifeAI 的个人生活助手。",
@@ -63,6 +84,11 @@ def build_system_prompt(
             if names:
                 lines.append(f"- {label}：{'、'.join(names)}")
 
+    if tools_enabled:
+        lines.append("")
+        lines.append("工具：")
+        lines += list(TOOL_RULES)
+
     lines += [
         "",
         "规则：",
@@ -74,4 +100,33 @@ def build_system_prompt(
     return "\n".join(lines)
 
 
-__all__ = ["build_system_prompt", "CATEGORY_LABELS"]
+__all__ = ["build_system_prompt", "build_retry_messages", "CATEGORY_LABELS", "TOOL_RULES"]
+
+
+def build_retry_messages(messages: list[dict], error_message: str) -> list[dict]:
+    """参数被拒时追加的「纠正提示」，用于第二轮（只重试一次）。
+
+    为什么需要它：模型给出的时间少写了时区（`2026-11-09 15:00`），
+    第 2 步会把它判成坏草稿丢掉 —— 用户什么也看不到。既然模型已经开口说了
+    「我帮你记一条」，最省事的补救是**把错误原话丢回去让它在原轮次里改一次**，
+    而不是让用户重新打一遍字。
+
+    形状：`[system] -> [user]`。只发这一条，不带历史：历史里那个坏参数已经
+    被解析器丢掉了，重发一遍反而会让模型以为自己是对的。
+    """
+    return [
+        {
+            "role": "system",
+            "content": messages[0]["content"] if messages else "",
+        },
+        {
+            "role": "user",
+            "content": "\n".join(
+                [
+                    messages[-1]["content"] if messages else "",
+                    f"（系统提示：上一次的工具参数没有通过校验：{error_message}。",
+                    "请按工具要求的格式重新给出一次；如果确实无法确定，就直接用文字反问用户。）",
+                ]
+            ),
+        },
+    ]

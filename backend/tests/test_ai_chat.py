@@ -155,8 +155,13 @@ def test_chat_passes_system_prompt_and_history(client, provider):
     # 分类注入：来自 categories 表（conftest 种了 41 条）
     assert "待办" in system and "工作" in system
     assert "支出" in system and "餐饮" in system
-    # A4 还没有工具，提示词里不能出现「调用工具」这种会让模型假装保存的句子
-    assert "create_" not in system
+    # A5 起提示词里出现了工具说明（正向强制「请你确认」），
+    # 这里守住反面：只允许出现「不要声称已经保存」这种**禁止**句，
+    # 不能出现「已经帮你保存好了」这种**宣称**句
+    assert "不要声称已经保存" in system  # 反面规则还在
+    for claim in ("已经帮你", "已为你", "已经记好"):
+        assert claim not in system
+    assert "调用工具帮用户创建待办" in system  # 工具规则本身必须发出去
     assert second[-1]["content"] == "第二问"
 
 
