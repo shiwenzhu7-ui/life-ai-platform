@@ -44,11 +44,21 @@
             :class="'ai__row--' + item.role"
           >
             <div
+              v-if="item.content || !item.pending_action"
               class="ai__bubble"
               :class="{ 'ai__bubble--failed': item.status === 'failed' }"
             >
               {{ item.content || '（无内容）' }}
             </div>
+            <!-- 卡片挂在产生它的那条助手消息下面，而不是另起一行：
+                 用户看到的是「AI 说了一句话 + 一张要他点的卡」这一件事 -->
+            <PendingActionCard
+              v-if="item.pending_action"
+              ref="cards"
+              :action="item.pending_action"
+              @confirm="handleConfirm"
+              @cancel="handleCancel"
+            />
             <div v-if="item.status === 'failed'" class="ai__retry">
               <span class="ai__retry-text">
                 {{ item.role === 'user' ? '没发出去' : '这条回复失败了' }}
@@ -107,11 +117,20 @@
 </template>
 
 <script>
-import { chat, createSession, listMessages, listSessions } from '@/api/ai'
+import PendingActionCard from '@/components/PendingActionCard.vue'
+import {
+  cancelAction,
+  chat,
+  confirmAction,
+  createSession,
+  listMessages,
+  listSessions
+} from '@/api/ai'
 import { formatDateTime as fmtDateTime } from '@/utils/format'
 
 export default {
   name: 'AiView',
+  components: { PendingActionCard },
   data() {
     return {
       sessions: [],
@@ -133,6 +152,10 @@ export default {
   created() {
     this.loadSessions()
   },
+  // 「确认/取消失败」要显示在卡片自己身上（而不是页面顶部），而卡片是子组件，
+  // 父组件只能通过 ref 调它的 finish() —— 这是 Vue 2 里「子组件表现自己、
+  // 父组件决定数据」的一种折中写法。409/410 时不用调：紧接着的 loadMessages
+  // 会用新数据整体替换消息数组，这张卡连着它的组件一起被销毁。
   methods: {
     // 左栏列表；第一次进入时自动选中第一条，省得页面空着等人的
     async loadSessions() {
@@ -240,7 +263,10 @@ export default {
           role: 'assistant',
           content: res.reply,
           status: 'ok',
-          created_at: new Date().toISOString()
+          created_at: new Date().toISOString(),
+          // 后端说「有动作待确认」时，卡片跟着这条消息渲染；
+          // 为 null（纯聊天）时什么都不加，界面和以前一样
+          pending_action: res.pending_action || null
         })
         this.scrollToBottom()
         // 首句会把「新对话」改成本句开头，左栏要跟着变
@@ -262,6 +288,67 @@ export default {
       this.messages = this.messages.filter((item) => item.id !== message.id)
       this.input = message.content
       this.handleSend()
+    },
+
+    // 卡片里点，状态在页面里改：卡片只管显示，页面管什么时候动数据
+    async handleConfirm(action) {
+      const cardRef = this.cardRefOf(action.id)
+      try {
+        const res = await confirmAction(action.id, null, { silent: true })
+        // 用响应里的最终内容更新卡片（用户以后要能改草稿时，这里就是回显改后版本的地方）
+        this.patchCard(action.id, {
+          status: res.status,
+          preview: res.preview,
+          created_id: res.created && res.created.id
+        })
+        // 待办真的建出来了：首页/待办页的数据已经变了，
+        // 这张卡片顺势记下新建的 id，好在卡片上给出「查看待办」的入口
+        this.errorText = ''
+      } catch (err) {
+        this.reportCardError(cardRef, err)
+      }
+    },
+
+    async handleCancel(action) {
+      const cardRef = this.cardRefOf(action.id)
+      try {
+        const res = await cancelAction(action.id, { silent: true })
+        this.patchCard(action.id, { status: res.status })
+      } catch (err) {
+        this.reportCardError(cardRef, err)
+      }
+    },
+
+    // 按 action_id 找到列表里那条消息的 pending_action，就地改
+    patchCard(actionId, patch) {
+      this.messages.forEach((item) => {
+        if (item.pending_action && item.pending_action.id === actionId) {
+          Object.assign(item.pending_action, patch)
+        }
+      })
+    },
+
+    // 卡片已经不在屏幕上（用户切了会话）时 refs 是空的，这一支什么都不做
+    cardRefOf(actionId) {
+      const cards = this.$refs.cards || []
+      return (
+        cards.find((card) => card.action && card.action.id === actionId) || null
+      )
+    },
+
+    // 409 = 这张卡在别处已经处理过（另一个标签页 / 连点）；410 = 过期。
+    // 这两种都不是「网络挂了」，而是「这张卡不能用了」：
+    // 把消息列表重新拉一遍，卡片就会显示成库里真实的状态，
+    // 比让用户对着一个僵住的按钮反复点强。401/5xx 之类则只把原因写在卡片上。
+    reportCardError(cardRef, err) {
+      const message = err.message || '操作失败'
+      if (err.status === 409 || err.status === 410) {
+        // 重新拉列表：旧卡片会随 messages 一起被替换掉，不用再 finish
+        this.loadMessages(this.activeId)
+        return
+      }
+      if (cardRef) cardRef.finish(message)
+      else this.errorText = message
     },
 
     // 模板里只能调 methods/computed 上的东西，直接 import 的函数挂不上，
