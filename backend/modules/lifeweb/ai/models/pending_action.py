@@ -1,4 +1,4 @@
-﻿"""ai_pending_actions 表（待确认写入）。
+"""ai_pending_actions 表（待确认写入）。
 
 设计依据 `docs/数据库设计.md` §3.18。
 
@@ -12,10 +12,11 @@
     pending  ──确认──▶ confirmed ──▶ 已写入（executed_at 有值，result 记 task_id 等）
        │
        ├──用户取消──▶ cancelled
-       └──超时──▶ expired（expires_at 过期后由清理任务置位）
+       └──超时──▶ expired（expires_at 过期后，下次被读取或确认时置位）
 
 **只有 pending 能被确认一次**：UPDATE ... WHERE status='pending' 的影响行数就是判据，
-两个人同时点确认时只有一个能写成功（幂等的兜底在 idempotency_key 唯一索引）。
+两个人同时点确认时只有一个能写成功。过期没有定时任务，靠 `pending.get_pending`
+读时判断（A5 的决定，理由见 pending.py 里那段注释）。
 """
 
 from datetime import datetime
@@ -47,7 +48,9 @@ PENDING_STATUSES = ("pending", "confirmed", "cancelled", "expired")
 class PendingAction(Base):
     __tablename__ = "ai_pending_actions"
     __table_args__ = (
-        # 前端生成 UUID，重复提交时插入直接失败 → 接口把唯一键冲突翻译成「已处理」
+        # A5 起由**服务端**生成（pending.create_draft）：建草稿这个动作不需要幂等，
+        # 需要幂等的是「确认」那一下，键在确认请求头里。这里保留唯一索引，
+        # 是为了将来真出现重复建草稿时数据库能兜住（唯一索引比应用层判断更可靠）
         UniqueConstraint("idempotency_key", name="uk_pending_idem"),
         # 「我有哪些待确认的、哪些过期了」——清理任务与前端角标都用它
         Index("idx_pending_user_status", "user_id", "status", "expires_at"),

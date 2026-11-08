@@ -182,6 +182,21 @@ class PendingActionOut(BaseModel):
     )
 
 
+class ActionConfirmRequest(BaseModel):
+    """确认卡片时的请求体（A5 第 5 步用）。
+
+    `payload_override` 是用户在前端改过的草稿：改了标题、时间、优先级之后点确认，
+    改过的内容要随请求带上来。`null` 表示「按卡片上原样执行」。
+
+    **注意它只是「用户说改成什么」，不是「已校验」**：用户改了也可能填个空标题，
+    所以第 5 步会把它重新过一遍 `CreateTaskPayload`，不能因为来源是用户就免检。
+    """
+
+    payload_override: dict[str, Any] | None = Field(
+        default=None, description="用户修改后的草稿；null 表示按原样执行"
+    )
+
+
 class ChatResponse(BaseModel):
     """一问一答的响应。
 
