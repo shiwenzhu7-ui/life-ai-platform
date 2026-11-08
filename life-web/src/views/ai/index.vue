@@ -274,6 +274,8 @@ export default {
       return fmtDateTime(session.last_message_at || session.created_at)
     },
 
+
+  //将消息区滚动到最底部：
     scrollToBottom() {
       this.$nextTick(() => {
         const el = this.$refs.messagesEl

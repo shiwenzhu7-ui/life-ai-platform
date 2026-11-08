@@ -16,10 +16,11 @@ cd backend
 3. **表结构以模型为准**：session 开始时 `drop_all` + `create_all`，不跑 Alembic。
    改了模型不用写迁移就能跑测试；但迁移本身仍要单独验证（`alembic check`）。
 
-## 覆盖范围（137 条）
+## 覆盖范围（146 条）
 
 | 文件 | 数量 | 覆盖 |
 |---|---|---|
+| `test_ai_tools.py` | 9 | 工具声明可 json 序列化且中文不转义、结构合 OpenAI 规范（type/description/required 与 properties 对得上/additionalProperties=False）、名字唯一、TOOL_NAMES 一致、create_task 只有 title 必填、参数名与 tasks 模块同名词、priority 枚举与库一致、模块常量不被调用方改动 |
 | `test_ai_provider.py` | 16 | 假 provider 排队与入参记录、请求形状与 Bearer 头、工具透传、响应解析（含只调工具）、401 不泄露 key、429 重试一次、5xx 不无限重试、超时/连不上/坏 JSON、工厂无 key 报错 |
 | `test_ai_sessions.py` | 19 | 新建默认标题/自定义/空白拒绝/忽略请求体 user_id、列表排序（空会话置后）与分页、软删过滤、跨用户 404、同 session_id 下消息按 user_id 隔离、消息顺序与分页、改标题三态、软删后行仍在、连删 404 |
 | `test_ai_chat.py` | 16 | 不带 session_id 自动建会话并取首句标题、追加到已有会话、system 提示词含时间与分类、历史按序回灌且过滤失败行、用量记实际 model、按配置算费用、空/超长消息 422、别人的/软删的/不存在的会话 404 且不落消息、超时 504 落失败行与失败用量、429/401/503 映射 |
