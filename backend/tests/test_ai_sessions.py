@@ -321,6 +321,7 @@ def _make_pending(
     user_id: int = 1,
     status: str = "pending",
     minutes: int = 30,
+    result: dict | None = None,
 ) -> PendingAction:
     """造一张卡。`minutes` 可以是负数，用来造「已经过期但还没被置位」的行。"""
     action = PendingAction(
@@ -339,6 +340,7 @@ def _make_pending(
         status=status,
         idempotency_key=str(uuid.uuid4()),
         expires_at=now_utc() + timedelta(minutes=minutes),
+        result=result,
     )
     db.add(action)
     db.commit()
@@ -406,7 +408,62 @@ def test_messages_carry_resolved_cards_without_touching_status(client, db):
         assert fresh.get(PendingAction, stale.id).status == "pending"
 
 
-def test_other_users_cards_are_not_leaked(client, db):
+def test_messages_expose_created_id_for_confirmed_cards(client, db):
+    """确认过的那张卡，列表里要带出它建出来的记录 id。
+
+    不带的话，「查看待办 ▸」只在确认那一次响应里活着：
+    用户点完看到了，一刷新 / 一换会话就没了 —— 而记录其实一直在库里。
+    数据来源是 `ai_pending_actions.result`（确认时写进去的 {"type","id"}），
+    不重新查业务表，也不在主查询里加 JOIN。
+    """
+    session = _make_session(db)
+    confirmed_msg = _make_message(db, session.id, role="assistant", content="已创建")
+    pending_msg = _make_message(db, session.id, role="assistant", content="还在等他点")
+
+    _make_pending(
+        db,
+        session_id=session.id,
+        message_id=confirmed_msg.id,
+        status="confirmed",
+        result={"type": "task", "id": 151},
+    )
+    _make_pending(db, session_id=session.id, message_id=pending_msg.id)
+
+    items = client.get(f"{API}/ai/sessions/{session.id}/messages").json()["items"]
+    by_id = {item["id"]: item for item in items}
+
+    assert by_id[confirmed_msg.id]["pending_action"]["created_id"] == 151
+    # 还没确认的卡没有记录可链
+    assert by_id[pending_msg.id]["pending_action"]["created_id"] is None
+
+
+def test_created_id_survives_a_weird_result(client, db):
+    """result 被手工改坏（或来自旧版本）时，卡片降级成「没链接」而不是让列表 500。"""
+    session = _make_session(db)
+    answer = _make_message(db, session.id, role="assistant", content="坏的")
+    _make_pending(
+        db,
+        session_id=session.id,
+        message_id=answer.id,
+        status="confirmed",
+        result={"type": "task", "id": "151"},
+    )
+
+    items = client.get(f"{API}/ai/sessions/{session.id}/messages").json()["items"]
+    assert items[0]["pending_action"]["created_id"] is None
+
+
+def test_confirm_response_carries_created_id_too(client, db):
+    """确认接口的响应也要有拍平的 created_id，前端用它一次更新卡片，不必再拉列表。"""
+    session = _make_session(db)
+    answer = _make_message(db, session.id, role="assistant", content="请你确认")
+    card = _make_pending(db, session_id=session.id, message_id=answer.id)
+
+    resp = client.post(f"{API}/ai/actions/{card.id}/confirm")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "confirmed"
+    assert body["created"]["id"] == body["created_id"]
     """别人的卡不能挂在别人的消息上跟着返回（依赖消息本身已按 user_id 过滤）。"""
     session = _make_session(db)
     answer = _make_message(db, session.id, role="assistant", content="别人的卡")

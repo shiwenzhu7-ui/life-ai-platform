@@ -112,6 +112,11 @@ class PendingActionOut(BaseModel):
         default_factory=dict,
         description="给卡片直接显示的内容，已含分类名与可读时间",
     )
+    created_id: int | None = Field(
+        default=None,
+        description="确认后真正建出来的记录 id（从执行结果里取）；"
+        "消息列表也带它，所以刷新后「查看待办」链接不会消失",
+    )
 
     @classmethod
     def from_model(cls, action) -> "PendingActionOut":
@@ -121,7 +126,20 @@ class PendingActionOut(BaseModel):
             status=action.status,
             expires_at=to_beijing_iso(action.expires_at),
             preview=action.payload or {},
+            created_id=_created_id(action.result),
         )
+
+
+def _created_id(result: dict[str, Any] | None) -> int | None:
+    """从 ai_pending_actions.result 里取 `{"type": "task", "id": 151}` 的 id。
+
+    只认 int：确认那一刻写进去的是我们自己的 execute 模块，
+    但如果哪天有人手工改过库，宁可让卡片没有链接，也不要抛异常把整个列表弄挂。
+    """
+    if not isinstance(result, dict):
+        return None
+    created = result.get("id")
+    return created if isinstance(created, int) else None
 
 
 class MessageOut(BaseModel):
@@ -251,6 +269,10 @@ class ActionOut(BaseModel):
     preview: dict[str, Any] = Field(default_factory=dict, description="最终生效的内容")
     created: CreatedOut | None = Field(
         default=None, description="新建的业务记录；取消时恒为 null"
+    )
+    created_id: int | None = Field(
+        default=None,
+        description="与 `created.id` 同值，拍平一层方便前端直接塞回卡片",
     )
     executed_at: str | None = Field(default=None, description="执行时间（北京时间 ISO）")
 

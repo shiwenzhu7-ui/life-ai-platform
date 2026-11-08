@@ -48,7 +48,7 @@
               class="ai__bubble"
               :class="{ 'ai__bubble--failed': item.status === 'failed' }"
             >
-              {{ item.content || '（无内容）' }}
+              {{ bubbleText(item) }}
             </div>
             <!-- 卡片挂在产生它的那条助手消息下面，而不是另起一行：
                  用户看到的是「AI 说了一句话 + 一张要他点的卡」这一件事 -->
@@ -299,7 +299,7 @@ export default {
         this.patchCard(action.id, {
           status: res.status,
           preview: res.preview,
-          created_id: res.created && res.created.id
+          created_id: res.created_id || (res.created && res.created.id)
         })
         // 待办真的建出来了：首页/待办页的数据已经变了，
         // 这张卡片顺势记下新建的 id，好在卡片上给出「查看待办」的入口
@@ -353,6 +353,23 @@ export default {
 
     // 模板里只能调 methods/computed 上的东西，直接 import 的函数挂不上，
     // 所以这里给模板开一个同名入口（内部用别名调，避免自己递归自己）
+    // 气泡里的话：卡片一旦有结果，这句话就过期了 —— 模型当时只交了草稿，
+    // 库里存的是「我整理了一条待办，请你确认。」这类占位正文（service.FALLBACK_REPLY）。
+    // 让卡片自己说结果，气泡不再重复一遍「请你确认」，否则用户会以为还要再点一次。
+    bubbleText(item) {
+      const card = item.pending_action
+      if (card && card.status !== 'pending') {
+        const subject = card.action_type === 'create_task' ? '这条待办' : '这条记录'
+        const text = {
+          confirmed: `${subject}已经建好了。`,
+          cancelled: `${subject}已经取消，没有写入任何数据。`,
+          expired: `${subject}已经过期，需要的话再跟我说一次。`
+        }[card.status]
+        return text || '这条草案已经处理过了，可以继续跟我说下一件事。'
+      }
+      return item.content || '（无内容）'
+    },
+
     formatDateTime(value) {
       return fmtDateTime(value)
     },

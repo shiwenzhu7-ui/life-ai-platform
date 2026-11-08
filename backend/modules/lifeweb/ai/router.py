@@ -245,6 +245,7 @@ def _action_out(action, *, created: execute.Executed | None = None) -> ActionOut
         action_type=action.action_type,
         status=action.status,
         preview=action.payload or {},
+        created_id=PendingActionOut.from_model(action).created_id,
         created=(
             CreatedOut(type=created.created_type, id=created.created_id)
             if created is not None and created.created_type and created.created_id
