@@ -166,6 +166,22 @@ class UsageOut(BaseModel):
     )
 
 
+class PendingActionOut(BaseModel):
+    """待确认动作 —— 前端据此渲染确认卡片。
+
+    存在即表示「模型想改数据，但还没改」。前端必须渲染卡片等用户点头，
+    **此时任务/账本里没有任何新记录**（A5 的安全底线）。
+    """
+
+    id: int
+    action_type: str = Field(description="create_task / create_expense / …")
+    expires_at: str = Field(description="过期时间（北京时间 ISO）；过期后点确认返回 410")
+    preview: dict[str, Any] = Field(
+        default_factory=dict,
+        description="给卡片直接显示的内容，已含分类名与可读时间",
+    )
+
+
 class ChatResponse(BaseModel):
     """一问一答的响应。
 
@@ -176,4 +192,8 @@ class ChatResponse(BaseModel):
     session_id: int
     message_id: int
     reply: str = Field(description="模型回复正文；只调工具时可能为空串（A5 起）")
+    pending_action: PendingActionOut | None = Field(
+        default=None,
+        description="不为空表示有动作待用户确认；此时业务数据尚未写入",
+    )
     usage: UsageOut
