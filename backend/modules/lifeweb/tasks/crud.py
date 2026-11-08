@@ -4,9 +4,12 @@
   1. 必须带 user_id 过滤 —— 数据隔离的最后一道防线
   2. 必须排除软删除（deleted_at IS NULL）
 
-写操作在本层完成 commit：现在都是单表写入，事务边界就在一条语句里。
-等 V1.1 出现「一次操作改多张表」的需求，再把它上提到 service 层，
-否则每多一层就多一次「谁负责提交」的含糊地带。
+写操作默认在本层完成 commit：现在都是单表写入，事务边界就在一条语句里。
+
+例外是 `create(commit=False)`（A5 第 5 步加的）：AI 确认卡片时，
+「写入这条待办」和「把 ai_pending_actions 置成 confirmed」必须在同一个事务里 ——
+分两次提交的话，中途崩掉就会得到「待办建了、卡片还显示待确认」，
+再点一次确认又是一条重复待办。这时提交权上提到调用方（ai/execute.py）。
 """
 
 from datetime import date, timedelta
@@ -158,14 +161,18 @@ def get_for_user(db: Session, user_id: int, task_id: int) -> Task | None:
     return db.scalar(_base_query(user_id).where(Task.id == task_id))
 
 
-def create(db: Session, user_id: int, payload: TaskCreate) -> Task:
+def create(
+    db: Session, user_id: int, payload: TaskCreate, *, commit: bool = True
+) -> Task:
     """新建待办。
 
-    三个要点：
+    四个要点：
       1. user_id / status 由服务端决定，不读请求体
       2. due_at 入库前必须转成 naive UTC（库里只存 UTC）
       3. commit 之后的 refresh 不能省：created_at 是数据库默认值，
          不 refresh 拿回来就是 None，响应里会缺字段
+      4. `commit=False` 时只 flush 拿到自增 id，提交权交给调用方
+         （AI 确认卡片要和 pending 状态变更同事务，见模块 docstring）
     """
     task = Task(
         user_id=user_id,
@@ -177,6 +184,9 @@ def create(db: Session, user_id: int, payload: TaskCreate) -> Task:
         due_at=to_utc_naive(payload.due_at),
     )
     db.add(task)
+    if not commit:
+        db.flush()  # 只为了拿到 task.id；没提交，外面回滚它就不存在
+        return task
     db.commit()
     db.refresh(task)
     return task

@@ -1,12 +1,13 @@
 """AI 接口 —— 只做三件事，不含业务规则。
 
-1. 绑定并校验 HTTP 参数（Query / Body / Path）
+1. 绑定并校验 HTTP 参数（Query / Body / Path / Header）
 2. 注入 user_id（V1.0 固定演示用户；V1.2 换成 JWT 解析，本层不用改）
-3. 调 crud / service，把 ORM 对象转成响应 Schema
+3. 调 crud / service / execute，把 ORM 对象转成响应 Schema
 
-接口分两类：
+接口分三类：
     会话：新建 / 列表 / 改标题 / 软删（A3）
-    对话：发一句话拿回复（A4）；消息列表是只读（A3）
+    对话：发一句话拿回复（A4/A5）；消息列表是只读（A3）
+    待确认卡片：确认写入 / 取消（A5 第 5 步）
 
 两个 router 分开是因为路径前缀不同：`/ai/sessions` 与 `/ai`。
 为什么不是一个前缀 `/ai` 下全挂 —— 上一轮踩过：`/ai` + `/{session_id}`
@@ -23,11 +24,14 @@ from core.db import get_db
 from core.deps import get_current_user_id
 from core.errors import AppError, not_found
 from core.time import to_beijing_iso
-from modules.lifeweb.ai import crud, service
+from modules.lifeweb.ai import crud, execute, service
 from modules.lifeweb.ai.provider import LLMError, LLMProvider, build_provider
 from modules.lifeweb.ai.schema import (
+    ActionConfirmRequest,
+    ActionOut,
     ChatRequest,
     ChatResponse,
+    CreatedOut,
     MessageOut,
     PendingActionOut,
     SessionCreate,
@@ -39,9 +43,10 @@ from modules.shared.pagination import Page
 
 session_router = APIRouter(prefix="/ai/sessions", tags=["AI 助手"])
 chat_router = APIRouter(prefix="/ai", tags=["AI 助手"])
+action_router = APIRouter(prefix="/ai/actions", tags=["AI 助手"])
 
 # lifeweb/__init__.py 遍历它挂载；加新 router 只改这一行
-routers = (session_router, chat_router)
+routers = (session_router, chat_router, action_router)
 
 
 def _get_or_404(db: Session, user_id: int, session_id: int):
@@ -226,3 +231,75 @@ def chat(
             cost_estimate=turn.cost_estimate,
         ),
     )
+
+
+# ---------- 待确认卡片（A5 第 5 步） ----------
+
+
+def _action_out(action, *, created: execute.Executed | None = None) -> ActionOut:
+    """PendingAction → 响应体。确认和取消两条路共用，字段口径必须一致。"""
+    return ActionOut(
+        action_id=action.id,
+        action_type=action.action_type,
+        status=action.status,
+        preview=action.payload or {},
+        created=(
+            CreatedOut(type=created.created_type, id=created.created_id)
+            if created is not None and created.created_type and created.created_id
+            else None
+        ),
+        executed_at=to_beijing_iso(action.executed_at),
+    )
+
+
+@action_router.post(
+    "/{action_id}/confirm", response_model=ActionOut, summary="确认卡片，真正写入"
+)
+def confirm_action(
+    action_id: int,
+    payload: ActionConfirmRequest | None = Body(default=None),
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> ActionOut:
+    """用户点了「确认」：把卡片上的内容写进待办表，卡片置 confirmed。
+
+    这是整个 AI 模块里**唯一**会让模型产出的内容变成真实数据的地方。
+
+    可以整个不传请求体（等于「按卡片原样执行」），也可以传
+    `{"payload_override": {...}}` 带上用户改过的标题/时间/优先级。
+
+    错误码（前端按这个分流，别一律弹「系统错误」）：
+
+        404  这张卡不存在 / 不是我的
+        410  `ACTION_EXPIRED`      超过 30 分钟，卡片作废，请重新发起
+        409  `ACTION_NOT_PENDING`  已经确认过 / 已取消
+        422  `ACTION_PAYLOAD_INVALID`  改过的内容不合格（空标题、时间不带时区）
+        400  `ACTION_REJECTED`     动作类型暂不支持
+
+    并发安全：同一张卡被连点两下，第二个请求会等第一个提交完再拿到 409，
+    **不会建出两条待办**（行锁 + 状态判断，见 `pending.claim_action`）。
+    """
+    data = payload or ActionConfirmRequest()
+    executed = execute.confirm(
+        db,
+        user_id,
+        action_id,
+        payload_override=data.payload_override,
+    )
+    return _action_out(executed.action, created=executed)
+
+
+@action_router.post(
+    "/{action_id}/cancel", response_model=ActionOut, summary="取消卡片"
+)
+def cancel_action(
+    action_id: int,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> ActionOut:
+    """用户点了「不用了」：卡片置 cancelled，**不改任何业务数据**。
+
+    再把 cancel 两次：第一次 200，第二次 409 `ACTION_NOT_PENDING`。
+    """
+    action = execute.cancel(db, user_id, action_id)
+    return _action_out(action)

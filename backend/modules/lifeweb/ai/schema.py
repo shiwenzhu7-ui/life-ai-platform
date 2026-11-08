@@ -183,18 +183,44 @@ class PendingActionOut(BaseModel):
 
 
 class ActionConfirmRequest(BaseModel):
-    """确认卡片时的请求体（A5 第 5 步用）。
+    """确认卡片时的请求体（A5 第 5 步）。
 
     `payload_override` 是用户在前端改过的草稿：改了标题、时间、优先级之后点确认，
     改过的内容要随请求带上来。`null` 表示「按卡片上原样执行」。
 
     **注意它只是「用户说改成什么」，不是「已校验」**：用户改了也可能填个空标题，
-    所以第 5 步会把它重新过一遍 `CreateTaskPayload`，不能因为来源是用户就免检。
+    所以 `pending.prepare_payload` 会把它重新过一遍 `CreateTaskPayload`，
+    而且只认那几个白名单字段（`user_id`、`status` 之类塞进来会被忽略）。
     """
 
     payload_override: dict[str, Any] | None = Field(
         default=None, description="用户修改后的草稿；null 表示按原样执行"
     )
+
+
+class CreatedOut(BaseModel):
+    """确认成功后，业务表里新建了什么 —— 前端据此跳转（「查看这条待办」）。"""
+
+    type: str = Field(description="task / expense / shopping_item …")
+    id: int
+
+
+class ActionOut(BaseModel):
+    """确认 / 取消之后的卡片状态。
+
+    `status` 只可能是 confirmed（确认成功）或 cancelled（取消成功）。
+    **摘要即结果**：`preview` 是用户最终确认的那一版（含他改过的标题），
+    前端拿它直接更新卡片，不用再拉一次消息列表。
+    """
+
+    action_id: int
+    action_type: str
+    status: str = Field(description="confirmed / cancelled")
+    preview: dict[str, Any] = Field(default_factory=dict, description="最终生效的内容")
+    created: CreatedOut | None = Field(
+        default=None, description="新建的业务记录；取消时恒为 null"
+    )
+    executed_at: str | None = Field(default=None, description="执行时间（北京时间 ISO）")
 
 
 class ChatResponse(BaseModel):

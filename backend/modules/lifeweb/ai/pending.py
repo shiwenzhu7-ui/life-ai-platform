@@ -21,7 +21,11 @@
 
 事务边界：`create_draft` 只 `flush` 不 `commit` —— 它被 `service.chat` 在同一事务里
 调用，要和「assistant 消息 + 更新会话计数」一起提交或一起回滚。
-状态流转（确认 / 取消 / 置过期）是单表一条 UPDATE，在本文件 commit。
+真正的状态流转只在 `confirm_action`（第 5 步）里发生，而且**由它一个人提交**：
+「写业务表」和「置 confirmed」必须同生共死。
+
+`mark_confirmed` / `mark_cancelled` 是单条 UPDATE 的简化版，留给「不需要连业务写入」
+的场景（取消、手工修数据、测试）；确认走业务表的那条路用 `confirm_action`。
 """
 
 from __future__ import annotations
@@ -29,17 +33,33 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timedelta
+from typing import Any, Callable
 
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from core.errors import AppError, not_found
 from core.time import BEIJING, now_beijing, now_utc, to_utc_naive
-from modules.lifeweb.ai.action_schema import ToolDraft
+from modules.lifeweb.ai.action_schema import CreateTaskPayload, ToolDraft
 from modules.lifeweb.ai.models import ChatSession, PendingAction
 from modules.shared.categories.model import Category
 
 logger = logging.getLogger(__name__)
+
+# ---------- 错误码（第 5 步的三个接口都会抛，集中在这里） ----------
+
+# 卡已被确认过 / 已取消 / 已过期：这张卡不能再动了。
+# 前端拿到它应当刷新消息列表，卡片会显示成「已创建」而不是报错弹窗。
+CODE_ALREADY_DONE = "ACTION_NOT_PENDING"
+
+# 用户改过的草稿没通过校验（空标题、时间不带时区、优先级乱填……）
+CODE_BAD_PAYLOAD = "ACTION_PAYLOAD_INVALID"
+
+# 模型当初给的值落到业务表里仍然不合法（比如分类被删了）
+CODE_REJECTED = "ACTION_REJECTED"
+
+# 过期沿用第 3 步定的 410
+CODE_EXPIRED = "ACTION_EXPIRED"
 
 # 卡片有效期（分钟）。超过这个时间没点确认，卡片作废，用户得重新发起 ——
 # 理由是草稿里的「明天下午三点」是相对发起那一刻说的，太久以后点确认会建成一个过期待办。
@@ -87,6 +107,45 @@ def resolve_category_id(
         logger.warning("未知动作类型 %s，分类按未分类处理", action_type)
         return UNCATEGORIZED_ID
 
+    return _lookup_category_id(db, scope, category_name)
+
+
+def entity_category_id(db: Session, entity: str, category_id: Any) -> int:
+    """业务写入前再确认一次分类可用；不可用就落 0（未分类），流程不中断。
+
+    用途见 `execute._confirmed_category_id`。参数是**用户/模型改完之后的原始值**
+    （可能是 int、字符串、None），所以这里自己兜容错，不假定类型。
+
+    为什么不在 K1 抛错：「分类被管理员改名/删掉」不是用户的错，也不影响待办的
+    标题和时间。落 0 之后卡片照常建成未分类待办，前端想提示就提示。
+    """
+    if category_id is None or category_id == "" or category_id == UNCATEGORIZED_ID:
+        return UNCATEGORIZED_ID
+    try:
+        wanted = int(category_id)
+    except (TypeError, ValueError):
+        logger.info("分类 id %r 不是整数，按未分类处理", category_id)
+        return UNCATEGORIZED_ID
+    if wanted <= 0:
+        return UNCATEGORIZED_ID
+
+    exists = db.scalar(
+        select(Category.id)
+        .where(
+            Category.id == wanted,
+            Category.scope == entity,
+            Category.deleted_at.is_(None),
+        )
+        .limit(1)
+    )
+    if exists is None:
+        logger.info("分类 id=%s 在 %s 域里已不存在，按未分类处理", wanted, entity)
+        return UNCATEGORIZED_ID
+    return wanted
+
+
+def _lookup_category_id(db: Session, scope: str, category_name: str) -> int:
+    """按名字在某个域里查系统分类 id，查不到返回 0。"""
     category_id = db.scalar(
         select(Category.id)
         .where(
@@ -107,8 +166,15 @@ def resolve_category_id(
 
 
 # 动作类型 → categories.scope。现在只有 create_task；
-# 加 create_expense 时这里加一行，resolve_category_id 不用改
+# 加 create_expense 时这里加一行（`"create_expense": "expense"`），其余函数都不用改
 _SCOPE_BY_ACTION: dict[str, str] = {"create_task": "task"}
+
+# 动作类型 → 能写进业务表的东西。现在只有一个字段：
+#   entity        写到哪个表的什么域（决定分类要按哪个 scope 再校验一次）
+#   parse_payload 把（可能被用户改过的）dict 重新验成一棵可信对象
+ACTION_SPECS: dict[str, dict[str, Any]] = {
+    "create_task": {"entity": "task", "parse_payload": CreateTaskPayload},
+}
 
 
 # ---------- 可读文本 ----------
@@ -219,7 +285,9 @@ def _get_owned(db: Session, user_id: int, action_id: int) -> PendingAction:
     return action
 
 
-def get_pending(db: Session, user_id: int, action_id: int) -> PendingAction:
+def get_pending(
+    db: Session, user_id: int, action_id: int, *, locked: bool = False
+) -> PendingAction:
     """取一条「还能被确认」的动作；过期了就顺手置 expired 并抛 410。
 
     **过期是读时判断，没有定时任务**。A5 不引入后台调度，代价是库里会攒着
@@ -228,13 +296,18 @@ def get_pending(db: Session, user_id: int, action_id: int) -> PendingAction:
 
     为什么是 410 而不是 404：这条**确实存在过**，只是来晚了。前端据此提示
     「这个操作已过期，请重新发起」，比「不存在」有用。
+
+    若调用方已经握着行锁（`claim_action` / `execute.cancel` 的路径），
+    `locked=True` 跳过 `action.status = "expired"` 这一步 —— 那会把锁住的行改成脏状态，
+    随后调用方的 commit 会把它写进去，而调用方其实打算 rollback。
     """
     action = _get_owned(db, user_id, action_id)
 
     if action.status == "pending" and action.expires_at <= now_utc():
-        action.status = "expired"
-        db.commit()
-        raise AppError("ACTION_EXPIRED", "这个操作已过期，请重新发起", 410)
+        if not locked:
+            action.status = "expired"
+            db.commit()
+        raise AppError(CODE_EXPIRED, "这个操作已过期，请重新发起", 410)
 
     return action
 
@@ -296,15 +369,212 @@ def mark_cancelled(db: Session, action_id: int) -> bool:
     return _transition(db, action_id, "pending", status="cancelled")
 
 
+# ---------- 第 5 步：认领 + 确认（事务边界最重要的一段） ----------
+
+
+def _locked(db: Session, user_id: int, action_id: int) -> PendingAction:
+    """取本人名下的动作并加行锁（SELECT ... FOR UPDATE），**不提交、不加状态判断**。
+
+    为什么这里要锁而 `_transition` 不用：确认要「先看再写业务表」——
+    读草稿、往 tasks 插一行、回来置 status —— 中间隔着一整条 INSERT。
+    不用 `WHERE status='pending'` 那种乐观锁的话，两个并发确认会各自看到
+    pending、各自插一条待办，最后只有一个 UPDATE 成功，但两条待办已经躺在那儿了。
+
+    换成行锁之后，第二个请求会阻塞在这里，等第一个提交完再拿到行，
+    这时 status 已经是 confirmed，直接走 409。**整段窗口靠锁关闭，不靠重试。**
+
+    调用方必须保证锁一直持有到自己的 commit / rollback —— 所以本函数自己绝不提交，
+    也不做 `db.rollback()`（一 rollback 锁就没了，前面读的全白读）。
+    """
+    action = db.scalar(
+        select(PendingAction)
+        .where(PendingAction.id == action_id, PendingAction.user_id == user_id)
+        .with_for_update()
+    )
+    if action is None:
+        raise not_found("待确认操作不存在")
+    return action
+
+
+def _expire_and_raise(db: Session, action: PendingAction) -> None:
+    """"卡过期了，置 expired 并抛 410。"""
+    action.status = "expired"
+    db.commit()
+    raise AppError(CODE_EXPIRED, "这个操作已过期，请重新发起", 410)
+
+
+def prepare_payload(
+    db: Session, action: PendingAction, override: dict[str, Any] | None
+) -> dict:
+    """合成「最终要写进业务表的 payload」并重新校验一遍。
+
+    两个来源：
+
+        原草稿   payload 去掉前端预览用的两个派生字段
+                 （due_at_text / priority_text 是 create_draft 补的，
+                  不在 CreateTaskPayload 的字段里，带着进去会被 extra="forbid" 拒绝）
+        override 用户在前端改过的内容，**只认下面这些字段**：
+
+                 title / due_at / priority / category_name / category_id
+
+                 「认得的字段」这个边界很关键。客户端的 payload_override 里塞一个
+                 `user_id: 1` 或 `status: "done"`，如果原样透传下去，
+                 就等于让前端决定「写到谁名下」「直接建成已完成」。
+                 这里只挑白名单，等于把它们挡在门外 —— 前端传来的东西同样是不可信的输入。
+
+    **category_id 单独处理**：它不在 CreateTaskPayload 里（模型只给分类名，
+    不直接说 id），但它是「最终要落库的东西」之一，所以：
+
+        1. 从草稿继承了分类名的，现查一次 id —— 用户可能把「购物」改成了「工作」
+        2. override 里显式给了 category_id 的，用它（执行时还会按 scope 再验一次）
+        3. 前两步都没有，才沿用草稿里 create_draft 查好的那个 id
+
+    然后不管来源是哪边，**统一过一遍 payload 模型**：用户也可能填个空标题、
+    给个不带时区的时间。不能因为「这是用户亲自改的」就免检。
+    """
+    spec = ACTION_SPECS.get(action.action_type)
+    if spec is None:
+        # 数据库 ENUM 里有、代码里没登记：属于配置错误，不该发生
+        raise AppError(CODE_REJECTED, "这个操作类型暂不支持", 400)
+
+    model = spec["parse_payload"]
+    stored = action.payload or {}
+    raw = {key: value for key, value in stored.items() if key in model.model_fields}
+    if override:
+        for key in model.model_fields:
+            if key in override:
+                raw[key] = override[key]
+
+    try:
+        validated = model(**raw)
+    except Exception as exc:  # pydantic 的 ValidationError，但别让它走 500
+        raise AppError(CODE_BAD_PAYLOAD, f"待办内容不合法：{_short(exc)}", 422) from exc
+
+    data = validated.model_dump(mode="json")
+    data["category_id"] = _category_id_from(
+        db,
+        action,
+        data.get("category_name"),
+        override.get("category_id") if override else None,
+    )
+    return data
+
+
+def _category_id_from(
+    db: Session,
+    action: PendingAction,
+    category_name: str | None,
+    override_id: Any,
+) -> int:
+    """决定最终用哪个分类 id（三种来源，优先级见 prepare_payload 的说明）。
+
+    override 里给了就照单全收 —— 不在这里判断它合不合法，
+    因为「合不合法」要按业务域（scope）判断，那是 `entity_category_id` 的活，
+    而且要到真正写表那一刻才查得准。
+    """
+    if override_id is not None:
+        try:
+            return int(override_id)
+        except (TypeError, ValueError):
+            return UNCATEGORIZED_ID
+
+    stored = action.payload or {}
+    if category_name and category_name != stored.get("category_name"):
+        # 用户把分类名改了：以新名字为准，重新查一次
+        scope = _SCOPE_BY_ACTION.get(action.action_type)
+        if scope is not None:
+            return _lookup_category_id(db, scope, category_name)
+    return stored.get("category_id") or UNCATEGORIZED_ID
+
+
+def _short(exc: Exception, limit: int = 200) -> str:
+    """把 pydantic 的错误压成一行给人看。"""
+    text = " ".join(str(exc).split())
+    return text[:limit]
+
+
+def claim_action(db: Session, user_id: int, action_id: int) -> PendingAction:
+    """确认前的第一步：锁住这张卡，确认它现在**还**能被执行。
+
+    顺序很重要 —— 先加锁再判断状态，判断完锁还握在手里：
+    `get_pending` 那套「读后判断」放在这里不够，因为读完到写业务表之间
+    别人可能已经确认了。锁 + 事务保证这段窗口里没人能插队。
+
+    抛出之前先 `db.rollback()`：锁只在事务里有效，函数要退出了就把它放掉
+    （此时业务表一行都还没写，回滚是安全的）。
+    """
+    action = _locked(db, user_id, action_id)
+    if action.status != "pending":
+        status = action.status
+        db.rollback()
+        if status == "expired":
+            raise AppError(CODE_EXPIRED, "这个操作已过期，请重新发起", 410)
+        raise AppError(
+            CODE_ALREADY_DONE,
+            "这个操作已经处理过了" if status == "confirmed" else "这个操作已取消",
+            409,
+        )
+    if action.expires_at <= now_utc():
+        _expire_and_raise(db, action)
+    return action
+
+
+def confirm_action(
+    db: Session,
+    action: PendingAction,
+    payload: dict,
+    *,
+    write: Callable[[dict], dict[str, Any]],
+) -> PendingAction:
+    """执行写入 + 置 confirmed，**同一个事务，一次提交**。
+
+    `write` 是 `execute.py` 传进来的函数：它接收合成好的 payload，往业务表写一行，
+    返回要记进 `result` 的摘要（如 `{"task_id": 12}`）。
+
+    为什么一定要写和置位同事务：
+
+        commit 之后才置 confirmed  → 中间崩掉，卡片还是 pending，
+                                     用户再点一次 → 第二条待办（重复写入）
+        commit 之前置 confirmed    → 业务写失败回滚了，卡片却是 confirmed，
+                                     点什么都办不成（丢写入）
+
+    所以：`write()` 不提交 → 这里改 status/executed_at/result → 一次 commit。
+    `write()` 抛异常时由调用方 rollback（锁随之释放），卡片回到 pending，什么都没发生。
+
+    顺带把 `payload` 写回 `action.payload` 的**原始字段**（保留预览派生字段），
+    这样用户确认时改过的标题、时间，在卡片上刷新后也是改过的那一版 ——
+    「卡片上写什么，库里就有什么」。
+    """
+    summary = write(payload)
+
+    merged = {key: value for key, value in (action.payload or {}).items()}
+    merged.update(payload)
+    action.payload = build_preview(action.action_type, merged)
+    action.status = "confirmed"
+    action.executed_at = now_utc()
+    action.result = summary
+    db.commit()
+    return action
+
+
 __all__ = [
+    "ACTION_SPECS",
+    "CODE_ALREADY_DONE",
+    "CODE_BAD_PAYLOAD",
+    "CODE_EXPIRED",
+    "CODE_REJECTED",
     "DEFAULT_TTL_MINUTES",
     "PRIORITY_TEXT",
     "UNCATEGORIZED_ID",
     "build_preview",
+    "claim_action",
+    "confirm_action",
     "create_draft",
+    "entity_category_id",
     "format_due_text",
     "get_pending",
     "mark_cancelled",
     "mark_confirmed",
+    "prepare_payload",
     "resolve_category_id",
 ]
