@@ -11,11 +11,17 @@
 
 - **写入类**（`create_task` / `update_task` / `create_expense`）：产出一张待确认卡片，
   用户点确认才落库。
-- **只读类**（`query_tasks`）：立刻执行、结果回灌给模型继续说话，不落库、无卡片。
+- **只读类**（`query_tasks` / `query_expenses`）：立刻执行、结果回灌给模型继续说话，
+  不落库、无卡片。
 
 `update_task` 的存在顺带解释了为什么要先有 `query_tasks`：
 模型必须能**先查到那条待办的真实 id**，才谈得上改它。它的参数里
 `task_id` 是必填的 —— 模型不许靠猜 id 改数据。
+
+`query_expenses` 同时回答两种问法：「这个月花了多少」（要合计）和
+「上周都买了什么」（要明细）。合计永远按**全部命中记录**算，不受 `limit` 影响，
+否则「一共 3200」会被悄悄说成「这 5 条一共」。语句风格上与 `query_tasks` 对齐：
+日期参数用户说「这个月」就要模型自己换算成 `2026-11-01`，换算错就查错时间段。
 
 字段名与 `tasks/model.py`、`tasks/schema.py`、`docs/数据库设计.md` 保持同名
 （title / due_at / priority），全链路一个词，读代码时不用在脑子里做映射。
@@ -258,11 +264,71 @@ CREATE_EXPENSE: dict = {
     },
 }
 
+QUERY_EXPENSES: dict = {
+    "type": "function",
+    "function": {
+        "name": "query_expenses",
+        "description": (
+            "查询这个人自己名下的收支记录与合计，只读，不会修改任何数据。"
+            "用户问「这个月花了多少」「吃饭花了多少钱」「上周都买了什么」时调用；"
+            "问总数、问某类、问某段时间，都先用它拿真实数字再回答。"
+            "用户只是要记一笔账时不要用这个（用 create_expense）。"
+            "查询结果只是给你看的，回复里不要说「已经帮你改好/删掉」这类话。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "date_from": {
+                    "type": "string",
+                    "description": (
+                        "起始日期（含），形如 2026-11-01。"
+                        "用户说「这个月」就传当月 1 号，「上周」传上周一，「今天」传今天"
+                    ),
+                },
+                "date_to": {
+                    "type": "string",
+                    "description": "结束日期（含），形如 2026-11-30。与 date_from 配套使用",
+                },
+                "type": {
+                    "type": "string",
+                    "enum": ["expense", "income"],
+                    "description": (
+                        "expense=只看支出，income=只看收入。"
+                        "问「赚了多少」「工资呢」传 income；问「花了多少」传 expense 或不传"
+                    ),
+                },
+                "category_name": {
+                    "type": "string",
+                    "description": "分类名，只能从系统提示词里列出的分类中选，例如「餐饮」。不传则不限",
+                },
+                "account": {
+                    "type": "string",
+                    "description": "支付方式：现金 / 微信 / 支付宝 / 银行卡。用户没提就不传",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "description": "返回的明细条数，默认 5。合计不受这个限制，永远是全部记录的总和",
+                },
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+    },
+}
+
 # 顺序固定：以后加工具就往后追加，测试与请求体都依赖这个顺序稳定
-ALL_TOOLS: list[dict] = [CREATE_TASK, QUERY_TASKS, UPDATE_TASK, CREATE_EXPENSE]
+ALL_TOOLS: list[dict] = [
+    CREATE_TASK,
+    QUERY_TASKS,
+    UPDATE_TASK,
+    CREATE_EXPENSE,
+    QUERY_EXPENSES,
+]
 
 # 只读工具名：tool_flow 据此分流 —— 这批立刻执行并回灌，不产生待确认卡片
-READ_ONLY_TOOLS: frozenset[str] = frozenset({"query_tasks"})
+READ_ONLY_TOOLS: frozenset[str] = frozenset({"query_tasks", "query_expenses"})
 
 # 模型可能申请一个不存在的工具名（幻觉），用集合一秒判断认不认。
 # frozenset 不可变，也不怕谁 import 之后 append

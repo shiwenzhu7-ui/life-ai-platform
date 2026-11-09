@@ -20,6 +20,11 @@ from modules.lifeweb.expenses.model import EXPENSE_SOURCES, Expense
 from modules.lifeweb.expenses.schema import ExpenseCreate, ExpenseUpdate
 from modules.shared.money import money
 
+# AI 查账的明细上限。与 tasks.MAX_SEARCH_LIMIT 同理：明细会被回灌进请求体，
+# 放开就是几千 token 的账单，而模型反而更容易挑错行。
+MAX_SEARCH_LIMIT = 10
+DEFAULT_SEARCH_LIMIT = 5
+
 
 def _base_query(user_id: int) -> Select:
     """所有查询的公共起点：限本人 + 未删除。"""
@@ -187,6 +192,75 @@ def soft_delete(db: Session, expense: Expense) -> None:
     """
     expense.deleted_at = now_utc()
     db.commit()
+
+
+def search(
+    db: Session,
+    user_id: int,
+    *,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    type: str | None = None,
+    category_id: int | None = None,
+    account: str | None = None,
+    limit: int = DEFAULT_SEARCH_LIMIT,
+) -> dict:
+    """AI 查账用的「明细 + 合计 + 合计条数」一次取回。
+
+    与 `list_for_user` 的区别：那个是给页面翻页用的（要 page/total），
+    这个只给模型看，所以只取当页明细，但**合计必须按全部命中记录算** ——
+    模型说「这个月一共花了 3200」时，这个 3200 要是全部 37 笔的和，
+    不是眼前这 5 笔的和。limit 只影响明细条数。
+
+    返回的金额都是两位小数的字符串（走 `money()`），与页面口径一致。
+    """
+    conds: list = [Expense.user_id == user_id, Expense.deleted_at.is_(None)]
+
+    # 与 list_for_user 同一套半开区间：date_from 当天 00:00(北京) ≤ occurred_at
+    # < date_to 次日 00:00(北京)，所以「11 月 1 日到 11 月 30 日」包含两端整天
+    if date_from:
+        conds.append(Expense.occurred_at >= beijing_day_start_utc(date_from))
+    if date_to:
+        conds.append(Expense.occurred_at < beijing_day_start_utc(date_to + timedelta(days=1)))
+    if type:
+        conds.append(Expense.type == type)
+    if category_id is not None:
+        conds.append(Expense.category_id == category_id)
+    if account:
+        conds.append(Expense.account == account)
+
+    size = min(max(1, int(limit)), MAX_SEARCH_LIMIT)
+
+    rows = list(
+        db.scalars(
+            select(Expense)
+            .where(*conds)
+            .order_by(Expense.occurred_at.desc(), Expense.id.desc())
+            .limit(size)
+        ).all()
+    )
+
+    # 合计那条 SQL 与明细分开：明细被 limit 截断了，合计不能跟着被截断。
+    # 按 type 分组，这样「收入多少、支出多少」一次就够，不用跑两条。
+    # 用了几列就在 select 里列几列（group_by 不再额外带 type）：
+    # MySQL 会把分组键自动追加到结果里，那样每行是三元组，dict() 装不下。
+    groups = db.execute(
+        select(Expense.type, func.sum(Expense.amount), func.count(Expense.id))
+        .where(*conds)
+        .group_by(Expense.type)
+    ).all()
+    totals = {kind: (total, count) for kind, total, count in groups}
+    expense_sum = Decimal(totals.get("expense", (0, 0))[0] or 0)
+    income_sum = Decimal(totals.get("income", (0, 0))[0] or 0)
+    matched = sum(int(count) for _, count in totals.values())
+
+    return {
+        "items": rows,
+        "matched": matched,
+        "expense_total": money(expense_sum),
+        "income_total": money(income_sum),
+        "has_more": matched > len(rows),
+    }
 
 
 def daily_totals(db: Session, user_id: int, days: list[date]) -> list[dict]:

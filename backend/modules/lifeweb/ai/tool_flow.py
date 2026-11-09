@@ -53,7 +53,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Sequence
 
 from sqlalchemy.orm import Session
@@ -69,7 +69,9 @@ from modules.lifeweb.ai.models import ChatSession, PendingAction
 from modules.lifeweb.ai.pending import create_draft, resolve_category_id
 from modules.lifeweb.ai.provider import LLMError, LLMProvider, LLMReply, merge_replies
 from modules.lifeweb.ai.tools import ALL_TOOLS, READ_ONLY_TOOLS, TOOL_NAMES
+from modules.lifeweb.expenses import crud as expenses_crud
 from modules.lifeweb.tasks import crud as tasks_crud
+from modules.shared.money import money
 
 # 重试时塞给模型的错误原文上限：完整校验信息可能几百字，太长反而盖住重点
 _REJECTION_MAX = 300
@@ -395,6 +397,16 @@ def _run_read_calls(
             # 留着条目本身：模型轮数用尽却一个字没说时，
             # _synthetic_summary 要拿它拼出一段给用户看的正文
             "items": list(payload["items"]),
+            # 查账的合计：兜底正文要用，否则只会甩一串明细
+            "totals": (
+                {
+                    "matched": payload.get("matched", payload["count"]),
+                    "expense_total": payload.get("expense_total", "0.00"),
+                    "income_total": payload.get("income_total", "0.00"),
+                }
+                if payload.get("totals")
+                else None
+            ),
         }
         records.append(record)
         new_convo.append(
@@ -410,14 +422,19 @@ def _run_read_calls(
 def _run_read_tool(
     db: Session, *, tool_name: str, params: dict[str, Any], user_id: int
 ) -> dict[str, Any]:
-    """执行一次只读查询，返回 `{"count": n, "items": [...], "truncated": bool}`。
+    """执行一次只读查询，返回 `{"count": n, "items": [...], "truncated": bool, ...}`。
 
-    只认 `tool_name == "query_tasks"` 一种。多一种工具就多一个 `if`，
-    而不是搞一张 dispatch 表 —— 现在只有两个只读工具的未来规划，
-    抽象一层反而让人看不出「查询到底做了什么」。
+    按工具名分流到两个执行器。多一种工具就多一个 `if`，而不是搞一张 dispatch 表 ——
+    两个函数各读各的参数，比一张间接表更容易一眼看出「查询到底做了什么」。
     """
-    if tool_name != "query_tasks":
-        raise ValueError(f"未知的只读工具：{tool_name}")
+    if tool_name == "query_tasks":
+        return _run_query_tasks(db, params, user_id)
+    if tool_name == "query_expenses":
+        return _run_query_expenses(db, params, user_id)
+    raise ValueError(f"未知的只读工具：{tool_name}")
+
+
+def _run_query_tasks(db: Session, params: dict[str, Any], user_id: int) -> dict[str, Any]:
 
     category_name = params.get("category_name")
     category_id = (
@@ -487,6 +504,61 @@ def _parse_datetime(value: Any) -> datetime | None:
         return None
 
 
+def _parse_date(value: Any) -> date | None:
+    """`2026-11-01` / `2026-11-01T00:00:00+08:00` 都取日期部分；解析不出来当没给。"""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
+
+
+def _run_query_expenses(db: Session, params: dict[str, Any], user_id: int) -> dict[str, Any]:
+    """查账：明细 + 合计（合计按全部命中记录算，见 expenses_crud.search）。"""
+    category_name = params.get("category_name")
+    category_id = None
+    if category_name:
+        # scope 必须传 "expense"：task 域也有「购物」（id 18），传错域会静默查错分类
+        category_id = resolve_category_id(db, "create_expense", category_name)
+        if category_id == 0:
+            return {
+                "count": 0,
+                "items": [],
+                "truncated": False,
+                "unknown_category": category_name,
+            }
+
+    found = expenses_crud.search(
+        db,
+        user_id,
+        date_from=_parse_date(params.get("date_from")),
+        date_to=_parse_date(params.get("date_to")),
+        type=params.get("type") or None,
+        category_id=category_id,
+        account=(params.get("account") or None),
+        limit=int(params.get("limit") or expenses_crud.DEFAULT_SEARCH_LIMIT),
+    )
+
+    rows = found["items"]
+    return {
+        # count 是「返回的明细条数」，matched 才是「命中的总条数」——
+        # 合计用 matched 算，模型就不会把「这 5 条」说成「一共」
+        "count": len(rows),
+        "items": [_expense_line(row) for row in rows],
+        "truncated": found["has_more"],
+        "matched": found["matched"],
+        "expense_total": found["expense_total"],
+        "income_total": found["income_total"],
+        # 给 _fold_messages 用：合计那几行要单独渲染成一段，而不是混在明细里
+        "totals": True,
+    }
+
+
 def _task_line(task: Any) -> str:
     """一条待办的紧凑文字形式。
 
@@ -508,6 +580,27 @@ def _task_line(task: Any) -> str:
 
 _STATUS_TEXT = {"todo": "未完成", "doing": "进行中", "done": "已完成", "cancelled": "已取消"}
 _PRIORITY_TEXT = {"low": "低", "medium": "中", "high": "高"}
+_EXPENSE_TYPE_TEXT = {"expense": "支出", "income": "收入"}
+
+
+def _expense_line(expense: Any) -> str:
+    """一笔账的紧凑文字形式，与 _task_line 同理：只留模型用得上的字段。
+
+    金额从 `money()` 出（两位小数字符串），日历上写北京时间 ——
+    库里 07:00 UTC 是用户眼里的 15:00，回灌错时区模型就会照着 UTC 说时间。
+    """
+    parts = [
+        f"金额=¥{money(expense.amount)}",
+        f"类型={_EXPENSE_TYPE_TEXT.get(expense.type, expense.type)}",
+        f"时间={_fmt_due(expense.occurred_at)}",
+        f"支付方式={expense.account}",
+    ]
+    # category_id=0 是「未分类」，值得说出来；名字由模型对照提示词里的分类表翻译
+    parts.append(f"分类id={expense.category_id}")
+    if expense.note:
+        parts.append(f"备注={expense.note}")
+    parts.append(f"id={expense.id}")
+    return "，".join(parts)
 
 
 def _fmt_due(naive_utc: datetime) -> str:
@@ -539,11 +632,20 @@ def _fold_messages(
     if unknown:
         lines.append(f"没有名为「{unknown}」的分类，这个条件查不到任何数据。")
 
+    if payload.get("totals"):
+        # 合计先于明细说：模型最容易犯的错就是把「返回的这 5 条」当成「全部」
+        matched = payload.get("matched") or 0
+        lines.append(f"命中记录：共 {matched} 条（合计按全部 {matched} 条算，不受条数上限影响）")
+        lines.append(
+            f"支出合计：¥{payload.get('expense_total', '0.00')}；"
+            f"收入合计：¥{payload.get('income_total', '0.00')}"
+        )
+
     if payload["count"] == 0:
         lines.append("结果：没有符合条件的记录。")
     else:
-        tail = "（已达返回上限，可能还有更多）" if payload.get("truncated") else ""
-        lines.append(f"结果：共 {payload['count']} 条{tail}：")
+        tail = "（明细只列了最近的一部分）" if payload.get("truncated") else ""
+        lines.append(f"明细 {payload['count']} 条{tail}：")
         lines.extend(f"- {item}" for item in payload["items"])
 
     if errors:
@@ -558,9 +660,21 @@ def _fold_messages(
 
 
 def _synthetic_summary(record: dict) -> LLMReply:
-    """模型查完却不说话时的兜底正文：直接把清单说给用户看。"""
+    """模型查完却不说话时的兜底正文：直接把清单说给用户看。
+
+    查账的合计优先给：用户问「这个月花了多少」时，一行合计比十条明细有用得多。
+    """
     found = record.get("found") or 0
     items = record.get("items") or []
+    totals = record.get("totals") or {}
+    if totals and found:
+        content = (
+            f"这个范围一共 {totals.get('matched', found)} 笔，"
+            f"支出合计 ¥{totals.get('expense_total', '0.00')}、"
+            f"收入合计 ¥{totals.get('income_total', '0.00')}。\n"
+            "最近的几笔：\n" + "\n".join(f"- {item}" for item in items)
+        )
+        return LLMReply(content=content)
     if not found:
         content = "查了一下，没有符合条件的事项。"
     else:

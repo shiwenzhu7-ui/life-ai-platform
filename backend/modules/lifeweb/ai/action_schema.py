@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -316,9 +316,89 @@ class QueryTasksPayload(BaseModel):
 # 所以查询 todo 时自动带上它 —— 见 tool_flow._run_read_tool。
 QUERYABLE_STATUS: tuple[str, ...] = ("todo", "done")
 
+
+class QueryExpensesPayload(BaseModel):
+    """query_expenses 的参数。全部可选 —— 「我一共花了多少」一个条件都没有也得能查。
+
+    日期用 `date` 而不是 `datetime`：账单是按「北京时间的哪一天」讲的。
+    模型传 `2026-11-01`，查询层用 `beijing_day_start_utc` 换成 UTC 半开区间，
+    换算只在一处发生（扩展成 datetime 反而会让「11-01T00:00」这种带时区的值
+    在某些时区下落到前一天）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    date_from: date | None = None
+    date_to: date | None = None
+    type: str | None = None
+    category_name: str | None = Field(default=None, max_length=32)
+    account: str | None = Field(default=None, max_length=32)
+    limit: int = DEFAULT_QUERY_LIMIT
+
+    @field_validator("date_from", "date_to", mode="before")
+    @classmethod
+    def date_sane(cls, value: Any) -> Any:
+        """模型偶尔给 `2026-11-01T00:00:00+08:00`，取日期部分即可，不要因此整条查询失败。
+
+        年份范围与待办时间同一套上下限：0206 年那种显然是模型写错。
+        """
+        if value is None or value == "":
+            return None
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+            except ValueError:
+                raise ValueError(f"日期格式不对：{text}，应形如 2026-11-01") from None
+            if not (_MIN_YEAR <= parsed.year <= _MAX_YEAR):
+                raise ValueError(f"日期超出了合理的年份范围（{_MIN_YEAR}-{_MAX_YEAR}）：{text}")
+            return parsed
+        return value
+
+    @field_validator("type")
+    @classmethod
+    def type_known(cls, value: str | None) -> str | None:
+        if value in (None, ""):
+            return None
+        if value not in ("expense", "income"):
+            raise ValueError("type 只能是 expense/income")
+        return value
+
+    @field_validator("category_name", "account")
+    @classmethod
+    def blank_means_none(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @field_validator("limit", mode="before")
+    @classmethod
+    def limit_clamp(cls, value: Any) -> int:
+        """与 QueryTasksPayload.limit 完全同一套收口（字符串数字、0、负数、垃圾值）。"""
+        return QueryTasksPayload.limit_clamp(value)
+
+    @model_validator(mode="after")
+    def date_range_ordered(self) -> "QueryExpensesPayload":
+        """起止反了就换过来，而不是报错。
+
+        「10 月 1 号到 9 月 30 号」多半是模型把先后说反了，用户的意图很清楚；
+        为此把整条查询降级成「不限时间」会让回答变成完全错误的数字。
+        """
+        if self.date_from and self.date_to and self.date_from > self.date_to:
+            self.date_from, self.date_to = self.date_to, self.date_from
+        return self
+
+
 # 只读工具名 → 参数模型。与 PAYLOAD_MODELS 分开：这张表里的调用**不产生草稿**，
 # 立刻执行、结果回灌，所以不会走 ACTION_TYPE_BY_TOOL 的翻译。
-READ_PAYLOAD_MODELS: dict[str, type[BaseModel]] = {"query_tasks": QueryTasksPayload}
+READ_PAYLOAD_MODELS: dict[str, type[BaseModel]] = {
+    "query_tasks": QueryTasksPayload,
+    "query_expenses": QueryExpensesPayload,
+}
 
 
 @dataclass(frozen=True)
@@ -489,6 +569,7 @@ __all__ = [
     "CreateExpensePayload",
     "CreateTaskPayload",
     "QUERYABLE_STATUS",
+    "QueryExpensesPayload",
     "QueryTasksPayload",
     "READ_PAYLOAD_MODELS",
     "ToolDraft",
