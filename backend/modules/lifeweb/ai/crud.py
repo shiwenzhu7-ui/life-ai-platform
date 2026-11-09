@@ -212,6 +212,48 @@ def recent_messages(
     return list(reversed(list(db.scalars(stmt).all())))
 
 
+def messages_upto(
+    db: Session,
+    user_id: int,
+    session_id: int,
+    *,
+    after_id: int | None,
+    end_id: int,
+    limit: int,
+) -> list[ChatMessage]:
+    """取 (after_id, end_id] 区间里的消息，按 id 升序、最多 limit 条。
+
+    A11 摘要用：after_id 是上次摘要覆盖到的位置（None 表示从头），
+    end_id 是本次窗口左边界的前一条 —— 窗口之内的消息要原样发给模型，
+    不能被折叠掉。`limit` 是保险丝，防止一次读几百条。
+    """
+    stmt = select(ChatMessage).where(
+        ChatMessage.user_id == user_id,
+        ChatMessage.session_id == session_id,
+        ChatMessage.id <= end_id,
+    )
+    if after_id is not None:
+        stmt = stmt.where(ChatMessage.id > after_id)
+    stmt = stmt.order_by(ChatMessage.id.asc()).limit(limit)
+    return list(db.scalars(stmt).all())
+
+
+def message_count(db: Session, user_id: int, session_id: int) -> int:
+    """这个会话一共多少条消息（含失败行、assistant 空行）。
+
+    只用来判断「窗口外是否攒够了一次摘要」，不需要精确到语义层面。
+    """
+    stmt = (
+        select(func.count())
+        .select_from(ChatMessage)
+        .where(
+            ChatMessage.user_id == user_id,
+            ChatMessage.session_id == session_id,
+        )
+    )
+    return int(db.scalar(stmt) or 0)
+
+
 def add_message(
     db: Session,
     *,

@@ -5,7 +5,8 @@
     models/     四张表（会话 / 消息 / 待确认写入 / 用量），见 `models/__init__.py`
     schema.py   请求 / 响应字段
     crud.py     数据访问（含 A4 的 add_message / touch_session / add_usage_log）
-    service.py  编排：发消息 → 调模型 → 落库（A4）
+    service.py  编排：发消息 → 调模型 → 落库（A4，A11 接前情摘要）
+    summary.py  长对话的前情摘要：滚动压缩 + 增量更新，失败不影响对话（A11）
     prompts.py  系统提示词（A5 第 4 步加回工具规则）
     provider.py 模型调用（A2）
     tools.py    工具声明（发给模型的说明书，A5 第 1 步写入类 / A6 只读类 / A7 update_task / A8 create_expense / A9 query_expenses / A10 delete_task）

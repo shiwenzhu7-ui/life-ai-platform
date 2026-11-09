@@ -39,7 +39,7 @@ class LocalBGEEmbedding:      # sentence-transformers
 3. 取/建 chat_sessions，落 user 消息到 chat_messages
 4. 构造上下文：
      - system 提示词（含当前时间、时区、可用分类枚举、用户角色）
-     - 最近 N 轮消息（N=10，超长时只保留最近 6 轮 + 摘要）
+     - 最近 N 轮消息（N=10，超长时保留最近 10 轮 + 前情摘要；已实现，见 A11）
      - 工具定义（8 个）
 5. 调用 LLM（tool calling 模式）
 6. 分支：

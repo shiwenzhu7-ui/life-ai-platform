@@ -20,9 +20,10 @@
    助手回复、会话计数、用量、ai_pending_actions 一起提交：
    不能出现「回复里说有一条待办、库里却没有草稿」，也不能反过来。
 
-上下文窗口：最近 `HISTORY_LIMIT` 条消息（≈10 轮），不做摘要。
-`docs/AI设计.md:42` 写的是「超长保留 6 轮 + 摘要」——摘要要额外一次模型调用，
-等真有长对话再补，现在先简单。
+上下文窗口：最近 `HISTORY_LIMIT` 条消息（≈10 轮）原文 + 一条滚动摘要（A11）。
+`docs/AI设计.md:42` 写的是「超长保留 6 轮 + 摘要」，现在的实现是 10 轮 + 摘要：
+窗口外的旧消息攒够 `SUMMARY_TRIGGER` 条后，压缩成一段 ≤200 字的前情摘要放在
+system 之后。摘要失败不影响这一轮对话（详见 `summary.py`）。
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from core.config import settings
 from core.errors import AppError, not_found
 from core.time import now_beijing, now_utc
 from modules.lifeweb.ai import crud
+from modules.lifeweb.ai import summary as summary_mod
 from modules.lifeweb.ai.models import ChatMessage, ChatSession, PendingAction
 from modules.lifeweb.ai.prompts import build_system_prompt
 from modules.lifeweb.ai.provider import LLMError, LLMProvider, LLMReply
@@ -109,8 +111,18 @@ def chat(
 
     # ---------- 2. 拼上下文（含刚存进去的这句话） ----------
     history = crud.recent_messages(db, user_id, session.id, limit=HISTORY_LIMIT)
+
+    # A11：窗口外的旧消息攒够了就压缩成摘要。失败返回 None（内部已吞异常），
+    # 本轮照常用最近 20 条原文回答 —— 摘要不能把正常对话变成 500。
+    # 放在拼 messages 之前：摘要会作为一条消息插进上下文。
+    summary = summary_mod.update_summary(db, provider, session, history)
+    if summary is not None:
+        _record_summary_usage(db, session, user_id, summary)
+
     categories = crud.system_categories(db)
-    llm_messages = _build_llm_messages(history, categories=categories)
+    llm_messages = _build_llm_messages(
+        history, categories=categories, summary=session.summary
+    )
 
     # 助手这一行先落库拿到 id：草稿要挂在它下面（「这张卡是哪句话产生的」），
     # 而正文、token、状态都得等模型回来才知道。**注意这里只 flush，不 commit。**
@@ -304,10 +316,12 @@ def _build_llm_messages(
     history: list[ChatMessage],
     *,
     categories: dict[str, list[str]] | None = None,
+    summary: str | None = None,
 ) -> list[dict]:
     """拼成 OpenAI 兼容的 messages 数组。
 
     - 第一条是 system（时间 + 分类 + 工具规则 + 说话规则）
+    - 有摘要时，第二条是「【前情摘要】…」的 user 消息（A11），排在原文之前
     - 只放 user / assistant 且 status=ok 且有正文的消息：
       失败行、status=pending 的半成品行、以及 content 为 `(无回复)` 的占位都不能放进去
       —— 模型看到自己上次「什么都没说」会开始瞎猜。
@@ -323,6 +337,12 @@ def _build_llm_messages(
             ),
         }
     ]
+    # A11：摘要放在 system 之后、原文之前。没有摘要（短对话）时这一条不存在，
+    # 上下文与 A10 之前完全一致。
+    if summary:
+        head = summary_mod.summary_message(summary)
+        if head is not None:
+            messages.append(head)
     for row in history:
         if row.status != "ok" or row.role not in ("user", "assistant"):
             continue
@@ -360,6 +380,33 @@ def _record_failure(
         error_code=exc.code,
     )
     db.commit()
+
+
+def _record_summary_usage(
+    db: Session, session: ChatSession, user_id: int, update: summary_mod.SummaryUpdate
+) -> None:
+    """给摘要那次调用单独记一条用量，**不 commit**（跟着本轮一起提交）。
+
+    为什么单独记而不是并进回复那条：摘要和回答是两次独立的 HTTP 调用，
+    混在一起的话「一次对话花了多少」就说不清了。
+
+    为什么 purpose 仍是 chat、靠 error_code 区分：`ai_usage_logs.purpose`
+    是 NOT NULL 的 ENUM（chat/embedding/report），加一个取值要改库里约束、
+    改表、改迁移，代价远大于收益。摘要本质仍是一次 chat 调用，
+    用 `summary_call` 这个标记就能在统计时筛出来。
+    """
+    crud.add_usage_log(
+        db,
+        user_id=user_id,
+        model=update.model or session.model or settings.llm_model,
+        purpose="chat",
+        token_in=update.token_in,
+        token_out=update.token_out,
+        cost_estimate=_estimate_cost(update.token_in, update.token_out),
+        latency_ms=update.latency_ms,
+        status="ok",
+        error_code="summary_call",
+    )
 
 
 def _estimate_cost(token_in: int, token_out: int) -> float:

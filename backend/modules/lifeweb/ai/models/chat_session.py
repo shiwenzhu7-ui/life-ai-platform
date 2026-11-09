@@ -12,6 +12,7 @@
 from datetime import datetime
 
 from sqlalchemy import BigInteger, DateTime, Index, Integer, String, func
+from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db import Base
@@ -43,6 +44,16 @@ class ChatSession(Base):
 
     # 最后一次消息时间：列表排序键。空会话（新建还没说话）为 NULL
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # ---------- A11：长对话的前情摘要 ----------
+    # 摘要只覆盖「已经滑出窗口」的旧消息，第三人称、不超过 300 字。
+    # 存成一列而不是一条 system 消息，是因为它是会话的属性（一个会话一份），
+    # 而且每次增量更新都是覆盖写，不该在消息列表里堆出多行。
+    summary: Mapped[str | None] = mapped_column(mysql.MEDIUMTEXT, nullable=True)
+
+    # 摘要已经覆盖到哪条消息（chat_messages.id）。空表示还没摘要过。
+    # 下一段要从 summary_until_id 之后开始算，避免同一段被反复摘要。
+    summary_until_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
