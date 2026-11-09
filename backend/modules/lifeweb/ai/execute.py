@@ -32,12 +32,13 @@ from typing import Any, Callable
 from sqlalchemy.orm import Session
 
 from core.errors import AppError, not_found
-from core.time import now_utc
+from core.time import now_utc, to_beijing_iso
 from modules.lifeweb.ai import pending
+from modules.lifeweb.ai.action_schema import UPDATABLE_EXPENSE_FIELDS
 from modules.lifeweb.ai.models import PendingAction
 from modules.lifeweb.ai.pending import CODE_EXPIRED, CODE_REJECTED
 from modules.lifeweb.expenses import crud as expenses_crud
-from modules.lifeweb.expenses.schema import ExpenseCreate
+from modules.lifeweb.expenses.schema import ExpenseCreate, ExpenseUpdate
 from modules.lifeweb.tasks import crud as tasks_crud
 from modules.lifeweb.tasks.schema import TaskCreate, TaskUpdate
 
@@ -266,6 +267,86 @@ def _write_delete(db: Session, user_id: int, payload: dict) -> dict[str, Any]:
     return {"type": "task", "id": task.id, "deleted": True}
 
 
+def _write_update_expense(db: Session, user_id: int, payload: dict) -> dict[str, Any]:
+    """update_expense → 改一条已存在的账（A12）。返回摘要。
+
+    三个要点：
+
+    1. **归属校验在这里**：`get_for_user` 用当前用户的 id 查，查不到 404。
+       卡片可能躺了二十分钟，这期间用户可能已经在账本里把这一笔删了 ——
+       那时这里是 None，回 404 而不是默默成功一次空操作。
+    2. **只写真正变了的字段**：`expense_changed_fields` 比过 before 与最终值，
+       只把变了的塞进 `ExpenseUpdate`。不这么做的后果是「没改的字段也被写一遍」，
+       `updated_at` 会凭空刷新，而对账的人把 updated_at 当「这笔记动过」的证据。
+    3. **note 的清空要显式给 None**：`ExpenseUpdate` 靠 `model_fields_set` 区分
+       「不动」和「清空」，所以清空时必须把键放进去、值为 None。
+    """
+    expense_id = int(payload["expense_id"])
+    expense = expenses_crud.get_for_user(db, user_id, expense_id)
+    if expense is None:
+        raise not_found("要修改的账目不存在")
+
+    before = expense_before_dict(expense)
+    changed = pending.expense_changed_fields(before, payload)
+
+    updates: dict[str, Any] = {}
+    for name in changed:
+        if name not in UPDATABLE_EXPENSE_FIELDS and name != "category_id":
+            continue
+        if name == "category_id":
+            updates["category_id"] = _confirmed_category_id(
+                db, "expense", payload.get("category_id")
+            )
+        elif name == "occurred_at":
+            updates["occurred_at"] = _as_datetime(payload.get("occurred_at"))
+        elif name == "note":
+            updates["note"] = payload.get("note") or None
+        else:
+            updates[name] = payload.get(name)
+
+    if not updates:
+        # 什么都没变：仍然算成功（用户点的就是这张卡），但不写库
+        return {"type": "expense", "id": expense.id, "changed": []}
+
+    update = ExpenseUpdate(**updates)
+    updated = expenses_crud.update(db, expense, update, commit=False)
+    return {"type": "expense", "id": updated.id, "changed": changed}
+
+
+def _write_delete_expense(db: Session, user_id: int, payload: dict) -> dict[str, Any]:
+    """delete_expense → 软删一笔账（A12）。返回摘要。
+
+    与 `_write_delete`（删待办）完全同一套规矩：归属校验在这里、软删不物理删、
+    `commit=False` 与卡片置位同事务、删了就删了没有撤销按钮。
+    """
+    expense_id = int(payload["expense_id"])
+    expense = expenses_crud.get_for_user(db, user_id, expense_id)
+    if expense is None:
+        raise not_found("要删除的账目不存在，可能已经删过了")
+
+    expenses_crud.soft_delete(db, expense, commit=False)
+    return {"type": "expense", "id": expense.id, "deleted": True}
+
+
+def expense_before_dict(expense: Any) -> dict[str, Any]:
+    """ORM 的 Expense → 与 `pending.expense_before` 同形的快照（用于比对）。
+
+    不直接调 `pending.expense_before`：那个函数要再查一次库，
+    而这里手里已经有对象了，多一次 SELECT 只为拼同样的字典不值当。
+    """
+    from modules.lifeweb.ai.pending import _amount_text  # noqa: SLF001
+
+    return {
+        "expense_id": expense.id,
+        "amount": _amount_text(expense.amount),
+        "type": expense.type,
+        "category_id": expense.category_id,
+        "account": expense.account,
+        "occurred_at": to_beijing_iso(expense.occurred_at),
+        "note": expense.note,
+    }
+
+
 def _as_datetime(value: Any):
     """payload 里的 due_at 是 ISO 字符串（model_dump(mode="json") 出来的）。"""
     if not value:
@@ -281,6 +362,8 @@ _WRITERS: dict[str, Callable[[Session, int, dict], dict[str, Any]]] = {
     "update_task": _write_update,
     "create_expense": _write_expense,
     "delete_task": _write_delete,
+    "update_expense": _write_update_expense,
+    "delete_expense": _write_delete_expense,
 }
 
 
@@ -295,4 +378,4 @@ def _confirmed_category_id(db_session: Session, scope: str, raw: Any) -> int:
     return pending.entity_category_id(db_session, scope, raw)
 
 
-__all__ = ["Executed", "cancel", "confirm"]
+__all__ = ["Executed", "cancel", "confirm", "expense_before_dict"]

@@ -358,6 +358,103 @@ DELETE_TASK: dict = {
     },
 }
 
+UPDATE_EXPENSE: dict = {
+    "type": "function",
+    "function": {
+        "name": "update_expense",
+        # 与 update_task 同构，但账目**没有标题**，模型无法靠「名字」认出是哪一笔，
+        # 只能靠 id。所以 description 的第一件事就是把「先查再改」这条流程说死。
+        "description": (
+            "修改一笔已存在的账。"
+            "只在用户明确要求改某一笔时调用，例如「把昨晚那笔打车改成 30 块」"
+            "「那杯咖啡记错分类了，应该是餐饮」。"
+            "expense_id 必须来自 query_expenses 的查询结果，不要凭记忆或猜测填写；"
+            "不知道是哪一笔时，先调用 query_expenses 找到它；查出来有多笔都像时，"
+            "把这几笔列出来问用户是哪一笔，不要自己挑一个；找不到就如实说没找到。"
+            "**只传用户要求改的那几个字段**，其余不传（不传 = 保持原值）；"
+            "不要顺手把分类、账户、备注重新猜一遍。"
+            "用户说的是「记错了一笔，删掉重记」这类要作废的，用 delete_expense，不要用本工具。"
+            "调用后只能说「我整理了一条修改，请你确认」，绝不能说你已经改好了。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "expense_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "要改的那笔账的 id，必须来自 query_expenses 结果里的 id=…",
+                },
+                "amount": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "改成的金额，正数，两位小数。用户没说就不传",
+                },
+                "type": {
+                    "type": "string",
+                    "enum": ["expense", "income"],
+                    "description": "支出还是收入。通常不用传；用户说「这笔其实是收入」才传",
+                },
+                "category_name": {
+                    "type": "string",
+                    "description": "改成的分类名，例如「餐饮」。用户没说就不传",
+                },
+                "account": {
+                    "type": "string",
+                    "description": "改成的支付方式：现金 / 微信 / 支付宝 / 银行卡。用户没说就不传",
+                },
+                "occurred_at": {
+                    "type": "string",
+                    "description": (
+                        "改成什么时间花的，带时区的 ISO8601，例如 2026-11-08T21:00:00+08:00。"
+                        "用户没说就不传"
+                    ),
+                },
+                "note": {
+                    "type": "string",
+                    "description": "改成的备注。用户没说就不传",
+                },
+            },
+            "required": ["expense_id"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+DELETE_EXPENSE: dict = {
+    "type": "function",
+    "function": {
+        "name": "delete_expense",
+        "description": (
+            "删除一笔已存在的账。"
+            "只在用户明确要求删掉某一笔时调用，例如「删掉昨天那杯咖啡」「这笔记错了，删了吧」。"
+            "expense_id 必须来自 query_expenses 的查询结果，不要凭记忆或猜测填写；"
+            "查出来有多笔都像时，列出来问用户是哪一笔；找不到就如实说没找到。"
+            "用户说「把这几笔都删了」时，一次只提一笔，等用户确认后再提下一笔。"
+            "只是想改数字或分类时用 update_expense，不要删了重记。"
+            "调用后只能说「我整理了一条删除，请你确认」，绝不能说你已经删掉了。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "expense_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "要删的那笔账的 id，必须来自 query_expenses 结果里的 id=…",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "为什么要删，一句话，比如「记错了」「重复记了」。"
+                        "会显示在确认卡上，帮用户核对。用户没说就不用传"
+                    ),
+                },
+            },
+            "required": ["expense_id"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 # 顺序固定：以后加工具就往后追加，测试与请求体都依赖这个顺序稳定
 ALL_TOOLS: list[dict] = [
     CREATE_TASK,
@@ -366,6 +463,8 @@ ALL_TOOLS: list[dict] = [
     CREATE_EXPENSE,
     QUERY_EXPENSES,
     DELETE_TASK,
+    UPDATE_EXPENSE,
+    DELETE_EXPENSE,
 ]
 
 # 只读工具名：tool_flow 据此分流 —— 这批立刻执行并回灌，不产生待确认卡片
@@ -374,7 +473,14 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({"query_tasks", "query_expenses"})
 # 写入工具名：这批产出一张待确认卡片。与 READ_ONLY_TOOLS 互补而不是互相推导 ——
 # 以后加第三个「既不是查询也不出卡」的工具（比如 set_reminder）时不会被误判成写入。
 WRITE_TOOLS: frozenset[str] = frozenset(
-    {"create_task", "update_task", "create_expense", "delete_task"}
+    {
+        "create_task",
+        "update_task",
+        "create_expense",
+        "delete_task",
+        "update_expense",
+        "delete_expense",
+    }
 )
 
 # 用户在**明确下令**记东西（「帮我记一下」「记个待办」「提醒我」）。

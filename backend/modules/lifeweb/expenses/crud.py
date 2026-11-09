@@ -154,7 +154,9 @@ def create(
     return expense
 
 
-def update(db: Session, expense: Expense, payload: ExpenseUpdate) -> Expense:
+def update(
+    db: Session, expense: Expense, payload: ExpenseUpdate, *, commit: bool = True
+) -> Expense:
     """局部更新：只把「请求里真的出现过」的字段写到对象上。
 
     exclude_unset=True 是这一步的核心：
@@ -173,12 +175,19 @@ def update(db: Session, expense: Expense, payload: ExpenseUpdate) -> Expense:
             value = to_utc_naive(value)  # 库里只存 naive UTC
         setattr(expense, key, value)
 
+    if not commit:
+        # AI 确认卡要走「改账 + 卡片置 confirmed」同一个事务，这里先 flush 不提交。
+        # 不 flush 的话调用方接着读 expense 拿到的是内存里的旧值，
+        # 而它恰好要拿新值去写 result（比如改完的金额）。
+        db.flush()
+        return expense
+
     db.commit()
     db.refresh(expense)
     return expense
 
 
-def soft_delete(db: Session, expense: Expense) -> None:
+def soft_delete(db: Session, expense: Expense, *, commit: bool = True) -> None:
     """软删除：只把 deleted_at 打上时间戳，那一行仍留在表里。
 
     只写一列，不碰 amount / type / 其它字段 —— 用户点「删除」的意思是
@@ -191,6 +200,10 @@ def soft_delete(db: Session, expense: Expense) -> None:
     代价是表会慢慢变大 —— 以后加一个「deleted_at 超过 90 天就物理删」的清理任务。
     """
     expense.deleted_at = now_utc()
+    if not commit:
+        # AI 确认卡：软删与「卡片置 confirmed」同事务，由 pending.confirm_action 统一提交
+        db.flush()
+        return
     db.commit()
 
 

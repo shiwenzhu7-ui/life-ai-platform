@@ -42,6 +42,8 @@ PENDING_ACTION_TYPES = (
     "update_task",
     "delete_task",
     "create_expense",
+    "update_expense",
+    "delete_expense",
     "add_shopping_item",
     "create_shopping_list",
 )

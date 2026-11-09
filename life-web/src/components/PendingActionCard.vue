@@ -13,6 +13,21 @@
       </template>
     </dl>
 
+    <!--
+      改账卡只说「哪一项从什么变成什么」。只列真的变了的字段 ——
+      把整笔账重列一遍会让用户去找「到底改了哪儿」，而这正是他要核对的东西。
+    -->
+    <dl v-if="changedFields.length" class="pa-card__fields pa-card__fields--diff">
+      <template v-for="row in changedFields">
+        <dt :key="row.key + '-k'" class="pa-card__label">{{ row.label }}</dt>
+        <dd :key="row.key + '-v'" class="pa-card__value">
+          <span class="pa-card__old">{{ row.before }}</span>
+          <i class="el-icon-right pa-card__arrow" />
+          <span class="pa-card__new">{{ row.after }}</span>
+        </dd>
+      </template>
+    </dl>
+
     <footer class="pa-card__foot">
       <!-- 只在还能操作时出现按钮：已确认 / 已取消 / 已过期的卡不该让人再点 -->
       <template v-if="actionable">
@@ -101,6 +116,8 @@ export default {
         update_task: '修改待办',
         delete_task: '删除待办',
         create_expense: '记一笔支出',
+        update_expense: '修改账目',
+        delete_expense: '删除账目',
         add_shopping_item: '加入购物清单'
       }[this.action.action_type] || '待确认操作'
     },
@@ -110,24 +127,42 @@ export default {
         update_task: 'el-icon-edit-outline',
         delete_task: 'el-icon-delete',
         create_expense: 'el-icon-money',
+        update_expense: 'el-icon-edit-outline',
+        delete_expense: 'el-icon-delete',
         add_shopping_item: 'el-icon-shopping-cart-2'
       }[this.action.action_type] || 'el-icon-warning-outline'
     },
     // 删除是不可逆的：按钮做成红色，文案说「删除」而不是「确认创建」。
     // 卡片上因此不能只写「确认」—— 用户点之前得知道这一下会发生什么。
     isDelete() {
-      return this.action.action_type === 'delete_task'
+      return (
+        this.action.action_type === 'delete_task' ||
+        this.action.action_type === 'delete_expense'
+      )
+    },
+    // 账目类动作的文案与待办分开：账本里「创建」叫「记一笔」，改账不叫「创建」
+    isExpense() {
+      return (
+        this.action.action_type === 'create_expense' ||
+        this.action.action_type === 'update_expense' ||
+        this.action.action_type === 'delete_expense'
+      )
     },
     confirmButtonType() {
       return this.isDelete ? 'danger' : 'primary'
     },
     confirmText() {
-      return this.isDelete ? '删除' : '确认创建'
+      if (this.isDelete) return '删除'
+      return this.action.action_type === 'update_task' ||
+        this.action.action_type === 'update_expense'
+        ? '确认修改'
+        : '确认创建'
     },
     statusText() {
+      const saved = this.isExpense ? '已记账' : '已创建'
       return {
         pending: '待确认',
-        confirmed: this.isDelete ? '已删除' : '已创建',
+        confirmed: this.isDelete ? '已删除' : saved,
         cancelled: '已取消',
         expired: '已过期',
         confirming: this.isDelete ? '删除中…' : '提交中…',
@@ -149,24 +184,88 @@ export default {
       }
       return out
     },
+    // 账目的字段集。金额/收支方向用后端算好的 *_text，
+    // 时间用 occurred_at_text（后端把 UTC 转成北京时间并补了星期）。
+    expenseFields(source) {
+      const out = []
+      if (source.amount_text) out.push({ key: 'amount', label: '金额', value: source.amount_text })
+      if (source.type_text) out.push({ key: 'type', label: '类型', value: source.type_text })
+      if (source.occurred_at_text) {
+        out.push({ key: 'occurred', label: '时间', value: source.occurred_at_text })
+      }
+      if (source.account) out.push({ key: 'account', label: '支付方式', value: source.account })
+      // 分类名只有在顶层 payload 里才有（before 快照里存的是 id）
+      if (source.category_name) {
+        out.push({ key: 'category', label: '分类', value: source.category_name })
+      }
+      if (source.note) out.push({ key: 'note', label: '备注', value: source.note })
+      return out
+    },
     // 删除卡显示的是「要删的那条长什么样」（后端 payload.gone 快照）。
     // 不能只显示理由：「你说删买菜」和「真的要删的是买菜」是两件事，
     // 模型抄错 id 时，这一栏会露出另一条待办的名字 —— 那是用户唯一的逃生机会。
     deleteFields() {
       const gone = this.preview.gone || {}
       const out = []
-      if (gone.title) out.push({ key: 'gone-title', label: '要删除', value: gone.title })
-      if (gone.due_at_text) out.push({ key: 'gone-due', label: '时间', value: gone.due_at_text })
-      if (gone.priority_text) {
-        out.push({ key: 'gone-priority', label: '优先级', value: gone.priority_text })
+      if (this.isExpense) {
+        out.push(...this.expenseFields(gone))
+      } else {
+        if (gone.title) out.push({ key: 'gone-title', label: '要删除', value: gone.title })
+        if (gone.due_at_text) {
+          out.push({ key: 'gone-due', label: '时间', value: gone.due_at_text })
+        }
+        if (gone.priority_text) {
+          out.push({ key: 'gone-priority', label: '优先级', value: gone.priority_text })
+        }
       }
       if (this.preview.reason) {
         out.push({ key: 'reason', label: '原因', value: this.preview.reason })
       }
       return out
     },
+    // 改账卡的核心：只列**真的变了**的那几项，每项一行「改前 → 改后」。
+    // 后端把「哪些字段变了」算好放在 preview.changed 里，
+    // 前端不重算 —— 规则散两处早晚会出现「卡片说没变、库里变了」。
+    changedFields() {
+      const p = this.preview
+      const before = p.before || {}
+      const after = {}
+      if (p.amount_text) after.amount = p.amount_text
+      if (p.type_text) after.type = p.type_text
+      if (p.occurred_at_text) after.occurred_at = p.occurred_at_text
+      if (p.account) after.account = p.account
+      if (p.category_id !== undefined) after.category_id = p.category_id
+      if (p.note !== undefined) after.note = p.note
+
+      const labels = {
+        amount: '金额',
+        type: '类型',
+        occurred_at: '时间',
+        account: '支付方式',
+        category_id: '分类',
+        note: '备注'
+      }
+      const shown = (value) => (value === null || value === undefined || value === '' ? '—' : value)
+      const changed = Array.isArray(p.changed) ? p.changed : []
+      return changed.map((key) => {
+        let beforeValue = before[key]
+        if (key === 'occurred_at') beforeValue = before.occurred_at_text
+        if (key === 'amount') beforeValue = before.amount_text
+        if (key === 'type') beforeValue = before.type_text
+        if (key === 'category_id') beforeValue = before.category_name
+        return {
+          key: 'chg-' + key,
+          label: labels[key] || key,
+          before: shown(beforeValue),
+          after: shown(after[key])
+        }
+      })
+    },
     shownFields() {
-      return this.isDelete ? this.deleteFields : this.fields
+      if (this.isDelete) return this.deleteFields
+      if (this.action.action_type === 'update_expense') return []
+      if (this.isExpense) return this.expenseFields(this.preview)
+      return this.fields
     },
     expireText() {
       const raw = this.action.expires_at
@@ -176,14 +275,22 @@ export default {
     },
     resultText() {
       if (this.isDelete) {
+        const what = this.isExpense ? '这笔账' : '这条待办'
         return {
-          confirmed: '已删除，这条待办不会出现在列表里',
-          cancelled: '已取消，待办还在',
+          confirmed: `已删除，${what}不会再出现在列表里`,
+          cancelled: `已取消，${what}还在`,
+          expired: '超过 30 分钟未处理，已失效'
+        }[this.status] || ''
+      }
+      if (this.action.action_type === 'update_expense') {
+        return {
+          confirmed: '已按这张卡改好',
+          cancelled: '已取消，账目没有变动',
           expired: '超过 30 分钟未处理，已失效'
         }[this.status] || ''
       }
       return {
-        confirmed: '已按这张卡创建完成',
+        confirmed: this.isExpense ? '已按这张卡记好' : '已按这张卡创建完成',
         cancelled: '已取消，没有写入任何数据',
         expired: '超过 30 分钟未处理，已失效'
       }[this.status] || ''
@@ -193,6 +300,9 @@ export default {
     // 删除卡不显示这个链接：那条待办刚被删掉，点进去只会看到「列表里没有它」。
     createdLink() {
       if (this.isDelete) return null
+      if (this.action.action_type === 'update_expense') {
+        return this.status === 'confirmed' ? '/expenses' : null
+      }
       return this.status === 'confirmed' && this.action.created_id ? '/tasks' : null
     }
   },
@@ -305,6 +415,29 @@ export default {
   margin: 0;
   color: #303133;
   word-break: break-all;
+
+  .pa-card--confirmed &,
+  .pa-card--cancelled &,
+  .pa-card--expired & {
+    color: #909399;
+  }
+}
+
+// 「改前 → 改后」：旧值划线、新值加粗。
+// 用颜色区分是不行的 —— 色弱用户分不出这两个色块，加上删除线和字重才稳。
+.pa-card__old {
+  color: #909399;
+  text-decoration: line-through;
+}
+
+.pa-card__arrow {
+  margin: 0 6px;
+  color: #c0c4cc;
+}
+
+.pa-card__new {
+  color: #303133;
+  font-weight: 600;
 
   .pa-card--confirmed &,
   .pa-card--cancelled &,

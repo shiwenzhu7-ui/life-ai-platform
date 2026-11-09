@@ -42,14 +42,19 @@ from sqlalchemy.orm import Session
 from core.errors import AppError, not_found
 from core.time import BEIJING, now_beijing, now_utc, to_beijing_iso, to_utc_naive
 from modules.lifeweb.ai.action_schema import (
+    UPDATABLE_EXPENSE_FIELDS,
     UPDATABLE_TASK_FIELDS,
     CreateExpensePayload,
     CreateTaskPayload,
+    DeleteExpensePayload,
     DeleteTaskPayload,
     ToolDraft,
+    UpdateExpensePayload,
     UpdateTaskPayload,
 )
 from modules.lifeweb.ai.models import ChatSession, PendingAction
+from modules.lifeweb.expenses import crud as expenses_crud
+from modules.lifeweb.expenses.model import Expense
 from modules.lifeweb.tasks import crud as tasks_crud
 from modules.shared.categories.model import Category
 
@@ -188,6 +193,10 @@ _SCOPE_BY_ACTION: dict[str, str] = {
     # 删除不需要分类（任务卡上只是把原分类显示出来），但表里得有这一行：
     # 少一行就会走到 resolve_category_id 的「未知动作」分支，只记一条 warning 收场
     "delete_task": "task",
+    # 改账要按 expense 域查分类（理由同上：两个域的「购物」是两个 id）
+    "update_expense": "expense",
+    # 删除账目同样不需要分类，但同样要有这一行
+    "delete_expense": "expense",
 }
 
 # 动作类型 → 能写进业务表的东西。现在只有一个字段：
@@ -198,10 +207,38 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
     "update_task": {"entity": "task", "parse_payload": UpdateTaskPayload},
     "create_expense": {"entity": "expense", "parse_payload": CreateExpensePayload},
     "delete_task": {"entity": "task", "parse_payload": DeleteTaskPayload},
+    "update_expense": {"entity": "expense", "parse_payload": UpdateExpensePayload},
+    "delete_expense": {"entity": "expense", "parse_payload": DeleteExpensePayload},
 }
 
 
 # ---------- 可读文本 ----------
+
+
+def expense_before(db: Session, user_id: int, expense_id: Any) -> dict:
+    """取一笔账「改之前的样子」，写进草稿的 before / gone 字段。
+
+    与 `task_before` 同样的三件用途（卡片上能核对、执行时能算 diff、找不到就 404），
+    差别在字段：账没有标题，认的是**金额 + 发生时间 + 支付方式**这三个对账的人
+    真正在意的信息。分类名也带上 —— 但只有非「未分类」时才带，
+    否则卡片上会出现「分类：未分类」这种多余的一行。
+
+    金额与创建卡一样格式化成「¥27.50」：`Decimal` 直接进 JSON 会变成 27.5，
+    卡片上两位小数断掉，用户一眼看不出改前改后差几分钱。
+    """
+    expense = expenses_crud.get_for_user(db, user_id, expense_id)
+    if expense is None:
+        raise not_found("要修改的账目不存在")
+
+    return {
+        "expense_id": expense.id,
+        "amount": _amount_text(expense.amount),
+        "type": expense.type,
+        "category_id": expense.category_id,
+        "account": expense.account,
+        "occurred_at": to_beijing_iso(expense.occurred_at),
+        "note": expense.note,
+    }
 
 
 def format_due_text(iso: str | None) -> str | None:
@@ -256,9 +293,21 @@ def build_preview(action_type: str, payload: dict) -> dict:
 
     if action_type == "create_expense":
         preview.update(_expense_texts(payload))
+    elif action_type == "update_expense":
+        # 改账卡的三块：改前、改后、以及「哪些字段变了」。
+        # changed 由这里算好存下来，而不是让前端拿两栏对象逐个比较：
+        # 前端一比就得知道「金额要按两位小数比、时间要比时间戳」这些规则，
+        # 规则散在两处，早晚会出现「卡片说没变、库里其实变了」。
+        preview.update(_expense_texts(payload))
+        before = payload.get("before")
+        changed: list[str] = []
+        if isinstance(before, dict):
+            preview["before"] = _more_readable(before)
+            changed = expense_changed_fields(before, payload)
+        preview["changed"] = changed
 
     before = payload.get("before")
-    if isinstance(before, dict):
+    if isinstance(before, dict) and "before" not in preview:
         preview["before"] = {
             **before,
             "due_at_text": format_due_text(before.get("due_at")),
@@ -272,7 +321,71 @@ def build_preview(action_type: str, payload: dict) -> dict:
             "due_at_text": format_due_text(gone.get("due_at")),
             "priority_text": PRIORITY_TEXT.get(gone.get("priority"), gone.get("priority")),
         }
+        if action_type == "delete_expense":
+            preview["gone"] = _more_readable(gone)
     return preview
+
+
+# 改账时「算不算改了」的比较单位。按这个顺序给前端，卡片上就按这个顺序列。
+# category_id 单列：模型只给分类名，最终落库的是 id，比较以 id 为准。
+EXPENSE_DIFF_FIELDS: tuple[str, ...] = (
+    "amount",
+    "type",
+    "category_id",
+    "account",
+    "occurred_at",
+    "note",
+)
+
+
+def _norm_amount(value: Any) -> str | None:
+    """金额一律按两位小数比：27.5 和 27.50 是同一笔，不该显示成「改了」。
+
+    还要认 `¥` 前缀：`expense_before` 存进 before 的就是格式化后的「¥27.50」，
+    不剥掉符号，`Decimal("¥27.50")` 直接抛 InvalidOperation，被 except 吞成
+    原样字符串 —— 结果两边永远不相等，每张改账卡都会说「金额变了」。
+    """
+    if value is None:
+        return None
+    text = str(value).strip().lstrip("¥").replace(",", "")
+    try:
+        return f"{Decimal(text):.2f}"
+    except (InvalidOperation, TypeError, ValueError):
+        return str(value)
+
+
+def _norm_time(value: Any) -> str | None:
+    """时间按**同一时区下的分钟**比：Z / +00:00 / +08:00 写的是同一刻就不算变。"""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return str(value)
+    if parsed.tzinfo is None:
+        return parsed.strftime(_TIME_FMT)
+    return parsed.astimezone(BEIJING).strftime(_TIME_FMT)
+
+
+def expense_changed_fields(before: dict, after: dict) -> list[str]:
+    """比出「改前 → 改后」真正变了的字段名（按 EXPENSE_DIFF_FIELDS 的顺序）。
+
+    只给字段名不给文本：文本由前端按自己那份 `before` / 顶层 payload 渲染，
+    两处都存中文的话，改完再刷新卡片容易一边新一边旧。
+    """
+    changed: list[str] = []
+    for name in EXPENSE_DIFF_FIELDS:
+        if name == "amount":
+            same = _norm_amount(before.get(name)) == _norm_amount(after.get(name))
+        elif name == "occurred_at":
+            same = _norm_time(before.get(name)) == _norm_time(after.get(name))
+        elif name == "note":
+            same = (before.get(name) or None) == (after.get(name) or None)
+        else:
+            same = before.get(name) == after.get(name)
+        if not same:
+            changed.append(name)
+    return changed
 
 
 def task_before(db: Session, user_id: int, task_id: Any) -> dict:
@@ -301,6 +414,25 @@ def task_before(db: Session, user_id: int, task_id: Any) -> dict:
     }
 
 
+def _amount_text(amount: Any) -> str:
+    """金额 → 「¥27.50」。转换不了就原样字符串化，不让一张卡因此渲染失败。"""
+    try:
+        return f"¥{Decimal(str(amount)):.2f}"
+    except (InvalidOperation, TypeError, ValueError):
+        return str(amount)
+
+
+def _category_name_of(db: Session, category_id: Any) -> str | None:
+    """账本分类 id → 名字，只用于卡片上显示「餐饮 → 交通」。查不到返回 None。"""
+    if not category_id:
+        return None
+    return db.scalar(
+        select(Category.name).where(
+            Category.id == category_id, Category.scope == "expense"
+        )
+    )
+
+
 def _expense_texts(payload: dict) -> dict:
     """记一笔的卡片文本：金额、方向、发生时间。
 
@@ -311,16 +443,26 @@ def _expense_texts(payload: dict) -> dict:
     occurred_at 可能没传（用户没说时间，create_draft 用「草稿创建的那一刻」补上了），
     所以这里一律能拿到值；万一为空就返回 None，前端跳过这一栏。
     """
-    amount = payload.get("amount")
-    try:
-        amount_text = f"¥{Decimal(str(amount)):.2f}"
-    except (InvalidOperation, TypeError, ValueError):
-        amount_text = str(amount)
     return {
-        "amount_text": amount_text,
+        "amount_text": _amount_text(payload.get("amount")),
         "type_text": EXPENSE_TYPE_TEXT.get(payload.get("type"), "支出"),
         "occurred_at_text": format_due_text(payload.get("occurred_at")),
     }
+
+
+def _more_readable(snapshot: dict) -> dict:
+    """给账单快照（before / gone）补上卡片直接能显示的文本。
+
+    返回新字典，不改入参 —— payload 会被存进 JSON 列，同一份对象被两处引用时
+    改一处等于改全部，这种 bug 在卡片上表现为「改前改后两栏一模一样」。
+    """
+    snapshot = {
+        **snapshot,
+        "amount_text": _amount_text(snapshot.get("amount")),
+        "type_text": EXPENSE_TYPE_TEXT.get(snapshot.get("type"), "支出"),
+        "occurred_at_text": format_due_text(snapshot.get("occurred_at")),
+    }
+    return snapshot
 
 
 # ---------- 创建 ----------
@@ -364,6 +506,48 @@ def create_draft(
         gone = task_before(db, user_id, payload.get("task_id"))
         payload = {
             "task_id": gone["task_id"],
+            "reason": payload.get("reason"),
+            "gone": gone,
+        }
+
+    if draft.action_type == "update_expense":
+        # 改账与改待办同构：拿「改之前」打底，模型给的字段覆盖上去。
+        # **分类名和 category_id 的语义差别**在这里：before 里的分类只有 id
+        # （库里存的就是 id），和顶层 payload 的 category_name 对不同 ——
+        # 所以这里额外补一个 before_category_name，供卡片显示「餐饮 → 交通」。
+        # 它只用于显示，不参与比较（比较用 category_id，见 expense_changed_fields）。
+        before = expense_before(db, user_id, payload.get("expense_id"))
+        merged = {**before}
+        for name in UPDATABLE_EXPENSE_FIELDS:
+            if name in payload and payload[name] is not None:
+                merged[name] = payload[name]
+        merged["expense_id"] = before["expense_id"]
+        merged["before"] = before
+        merged["before_category_name"] = _category_name_of(db, before.get("category_id"))
+        # 分类要在**算 diff 之前**解析好：模型给的是分类名（「餐饮」），
+        # 而 before 里只有 id（2）。不先换算，category_id 两边都是 2，
+        # 模型明明改了指的却是别的分类，diff 却报「没变」，卡片不显示这一行，
+        # 用户点确认后才在库里发现分类换了。
+        if merged.get("category_name") is not None:
+            merged["category_id"] = _lookup_category_id(db, "expense", merged["category_name"])
+        # 一句话都没改到：这张卡点下去什么也不会发生，但它长得很像「改成功了」。
+        # 真机踩到过——模型把原值又抄了一遍（会话 130 的第二轮，
+        # `{"expense_id": 126, "amount": 30}`，可那笔账本来就是 30），
+        # 卡片上 `changed` 是空的，用户点确认会得到「已按这张卡改好」，
+        # 而库里一个字没动。宁可不出卡，让模型用文字说清楚要改什么。
+        if not expense_changed_fields(before, merged):
+            raise AppError(
+                CODE_BAD_PAYLOAD,
+                "这次没有需要修改的内容：卡片上的值和账本里现在的一致，请说清楚要改成什么",
+                422,
+            )
+        payload = merged
+
+    if draft.action_type == "delete_expense":
+        # 与 delete_task 一样：卡上摆一份完整快照，找不到就 404 不出卡。
+        gone = expense_before(db, user_id, payload.get("expense_id"))
+        payload = {
+            "expense_id": gone["expense_id"],
             "reason": payload.get("reason"),
             "gone": gone,
         }
@@ -712,6 +896,24 @@ def prepare_payload(
             raise AppError(CODE_BAD_PAYLOAD, f"删除内容不合法：{_short(exc)}", 422) from exc
         return validated.model_dump(mode="json")
 
+    if action.action_type == "update_expense":
+        data = _prepare_update_expense(db, model, stored, override)
+        data["category_id"] = _category_id_for_update_expense(
+            db, stored, data.get("category_name"), override.get("category_id") if override else None
+        )
+        return data
+
+    if action.action_type == "delete_expense":
+        # 与 delete_task 同一条规矩：override 一个字都不许透传
+        raw = {key: value for key, value in stored.items() if key in model.model_fields}
+        if override:
+            raise AppError(CODE_BAD_PAYLOAD, "删除确认卡不支持修改内容，请直接确认或取消", 422)
+        try:
+            validated = model(**raw)
+        except Exception as exc:
+            raise AppError(CODE_BAD_PAYLOAD, f"删除内容不合法：{_short(exc)}", 422) from exc
+        return validated.model_dump(mode="json")
+
     raw = {key: value for key, value in stored.items() if key in model.model_fields}
     if override:
         for key in model.model_fields:
@@ -776,6 +978,74 @@ def _prepare_update(
         raise AppError(CODE_BAD_PAYLOAD, f"修改内容不合法：{_short(exc)}", 422) from exc
 
     return validated.model_dump(mode="json")
+
+
+def _prepare_update_expense(
+    db: Session, model: type, stored: dict, override: dict[str, Any] | None
+) -> dict:
+    """改一笔账的 payload 合成：`before` 打底，再叠草稿与 override 的改动项。
+
+    与 `_prepare_update`（改待办）是同一套三档规则：
+
+        before[字段]      打底（原值）
+        override 显式给的  覆盖
+        都没有            保持原值
+
+    **不能直接 `{**before, ...}` 交给模型**：before 里带 category_id / expense_id /
+    一堆预览用文本，而 `UpdateExpensePayload` 是 extra="forbid" 的。所以这里
+    只挑 `UPDATABLE_EXPENSE_FIELDS` 里的字段过去，id 单独补。
+
+    `note` 要按「有没有出现在 payload 里」判断而不是按值：空串是**清空备注**的
+    明确指令，用 `value is not None` 会把它当「没说要改」丢掉。
+    """
+    before = stored.get("before") if isinstance(stored.get("before"), dict) else {}
+    merged: dict[str, Any] = {
+        name: before.get(name) for name in UPDATABLE_EXPENSE_FIELDS if before.get(name) is not None
+    }
+
+    if override:
+        for name in UPDATABLE_EXPENSE_FIELDS:
+            if name in override and (override[name] is not None or name == "note"):
+                merged[name] = override[name]
+    else:
+        for name in UPDATABLE_EXPENSE_FIELDS:
+            if name in stored and (stored[name] is not None or name == "note"):
+                merged[name] = stored[name]
+
+    # 分类名和「改之前的名字」一样时不该重查（也就不会把 category_id 带歪）。
+    # before 里只有 id，比名字要靠 before_category_name —— 那是 create_draft 存下的。
+    if merged.get("category_name") == stored.get("before_category_name"):
+        merged.pop("category_name", None)
+
+    merged["expense_id"] = stored.get("expense_id") or before.get("expense_id")
+    try:
+        validated = model(**merged)
+    except Exception as exc:
+        raise AppError(CODE_BAD_PAYLOAD, f"修改内容不合法：{_short(exc)}", 422) from exc
+
+    return validated.model_dump(mode="json")
+
+
+def _category_id_for_update_expense(
+    db: Session, stored: dict, category_name: str | None, override_id: Any
+) -> int:
+    """改账该用哪个分类 id。
+
+    三档，与 `_category_id_for_update` 同构，只是比较基准来自 before：
+    override 给了 id → 用它（执行时按 expense 域再验一次）；
+    名字和原名不同 → 按新名字在 expense 域重查；否则沿用 before 的 id。
+    """
+    if override_id is not None:
+        try:
+            return int(override_id)
+        except (TypeError, ValueError):
+            return UNCATEGORIZED_ID
+
+    before = stored.get("before") if isinstance(stored.get("before"), dict) else {}
+    original_name = stored.get("before_category_name")
+    if category_name is not None and category_name != original_name:
+        return _lookup_category_id(db, "expense", category_name)
+    return before.get("category_id") or UNCATEGORIZED_ID
 
 
 def _category_id_from(
@@ -912,6 +1182,7 @@ __all__ = [
     "CODE_EXPIRED",
     "CODE_REJECTED",
     "DEFAULT_TTL_MINUTES",
+    "EXPENSE_DIFF_FIELDS",
     "PRIORITY_TEXT",
     "UNCATEGORIZED_ID",
     "build_preview",
@@ -919,6 +1190,8 @@ __all__ = [
     "confirm_action",
     "create_draft",
     "entity_category_id",
+    "expense_before",
+    "expense_changed_fields",
     "expire_open_drafts",
     "format_due_text",
     "get_pending",

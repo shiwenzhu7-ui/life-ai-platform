@@ -62,6 +62,8 @@ ACTION_TYPE_BY_TOOL: dict[str, str] = {
     "update_task": "update_task",
     "create_expense": "create_expense",
     "delete_task": "delete_task",
+    "update_expense": "update_expense",
+    "delete_expense": "delete_expense",
 }
 
 # 一次回复里最多采纳几份草稿。
@@ -267,12 +269,127 @@ class DeleteTaskPayload(BaseModel):
         return stripped or None
 
 
+# 改一笔账时「允许模型改变」的字段。
+#
+# 没有 category_id：和 create_expense 一样，模型只认分类**名字**，
+# 名字换 id 是 pending.create_draft 的活（且必须按 expense 域查）。
+# 没有 source：那是「哪条代码路径写的」的证据，改了就等于伪造来源。
+UPDATABLE_EXPENSE_FIELDS: tuple[str, ...] = (
+    "amount",
+    "type",
+    "category_name",
+    "account",
+    "occurred_at",
+    "note",
+)
+
+
+class UpdateExpensePayload(BaseModel):
+    """update_expense 的草稿：一笔已存在账的「改成什么」。
+
+    与 `UpdateTaskPayload` 有三处不同，都是「账没有标题」带来的：
+
+    1. **至少改一项**这条校验保留了 —— 只给 expense_id 等于「我想改但不知道改什么」。
+    2. `note` 允许显式传空串表示**清空备注**（待办那头不支持清空）。
+       备注是自由文本，「把备注去掉」是个明确的诉求；而金额/时间清空在对话里
+       没法可靠表达，所以那几项仍按「不传 = 不改」处理。
+    3. `expense_id` 的地位与 task_id 相同：**线索，不是授权**。
+       `pending.expense_before` 出卡时会拿当前用户的 id 查一遍，查不到就 404。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    expense_id: int = Field(ge=1)
+    amount: Decimal | None = Field(
+        default=None,
+        gt=Decimal("0"),
+        le=MAX_AMOUNT,
+        max_digits=12,
+        decimal_places=2,
+        description="金额，正数；收支方向由 type 表达",
+    )
+    type: ExpenseType | None = None
+    category_name: str | None = Field(default=None, max_length=32)
+    account: str | None = Field(default=None, max_length=32)
+    occurred_at: datetime | None = None
+    note: str | None = Field(default=None, max_length=255)
+
+    @field_validator("category_name")
+    @classmethod
+    def blank_category_means_none(cls, value: str | None) -> str | None:
+        return CreateExpensePayload.blank_category_means_none(value)
+
+    @field_validator("account")
+    @classmethod
+    def account_not_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("账户不能是空字符串")
+        return stripped
+
+    @field_validator("occurred_at")
+    @classmethod
+    def occurred_at_sane(cls, value: datetime | None) -> datetime | None:
+        return CreateExpensePayload.occurred_at_sane(value)
+
+    @model_validator(mode="after")
+    def at_least_one_change(self) -> "UpdateExpensePayload":
+        if not any(
+            name in self.model_fields_set and getattr(self, name) is not None
+            for name in UPDATABLE_EXPENSE_FIELDS
+        ) and "note" not in self.model_fields_set:
+            raise ValueError(
+                "至少要说清楚改什么（金额 / 收支方向 / 分类 / 支付方式 / 时间 / 备注 里的一项）"
+            )
+        return self
+
+    def changes(self) -> dict[str, Any]:
+        """只吐出真的给了值的字段。
+
+        与 `UpdateTaskPayload.changes()` 的唯一差别：`note` 的空串是**有意义的**
+        （清空备注），所以要按 `model_fields_set` 判断，不能按值是不是 None。
+        """
+        out: dict[str, Any] = {}
+        for name in UPDATABLE_EXPENSE_FIELDS:
+            if name not in self.model_fields_set:
+                continue
+            value = getattr(self, name)
+            if name == "note":
+                out[name] = value or None
+            elif value is not None:
+                out[name] = value
+        return out
+
+
+class DeleteExpensePayload(BaseModel):
+    """delete_expense 的草稿：删哪一笔、为什么删。
+
+    与 `DeleteTaskPayload` 结构完全一致，刻意不复用同一个类：
+    两个动作删除的是不同表、不同域的对象，将来要各自加字段
+    （比如账目可能要「删了顺便记一笔冲账」）时不必拆。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    expense_id: int = Field(ge=1)
+    reason: str | None = Field(default=None, max_length=60)
+
+    @field_validator("reason")
+    @classmethod
+    def blank_reason_means_none(cls, value: str | None) -> str | None:
+        return DeleteTaskPayload.blank_reason_means_none(value)
+
+
 # 工具名 → 校验模型。加写入工具时在这里加一行，`parse_tool_calls` 不用改
 PAYLOAD_MODELS: dict[str, type[BaseModel]] = {
     "create_task": CreateTaskPayload,
     "update_task": UpdateTaskPayload,
     "create_expense": CreateExpensePayload,
     "delete_task": DeleteTaskPayload,
+    "update_expense": UpdateExpensePayload,
+    "delete_expense": DeleteExpensePayload,
 }
 
 # 一次查询最多返回几条。与 tools.py 里 limit 的 maximum 是同一个数：
@@ -606,13 +723,16 @@ __all__ = [
     "MAX_QUERY_LIMIT",
     "CreateExpensePayload",
     "CreateTaskPayload",
+    "DeleteExpensePayload",
     "DeleteTaskPayload",
     "QUERYABLE_STATUS",
     "QueryExpensesPayload",
     "QueryTasksPayload",
     "READ_PAYLOAD_MODELS",
     "ToolDraft",
+    "UPDATABLE_EXPENSE_FIELDS",
     "UPDATABLE_TASK_FIELDS",
+    "UpdateExpensePayload",
     "UpdateTaskPayload",
     "parse_read_call",
     "parse_tool_calls",

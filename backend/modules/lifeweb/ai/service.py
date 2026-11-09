@@ -67,6 +67,7 @@ FALLBACK_REPLY_EXPENSE = "我整理了一笔账，请你确认。"
 
 # 删除类草稿的兜底正文。「我整理了一条待办」在这里更糟：用户会以为要新建，
 # 点下去却删掉了一条 —— 所以必须明说是删除，而且要和卡片上的红按钮对得上。
+# A12 起改账/删账也用它（两句话都不提「待办」，账目场景同样成立）。
 FALLBACK_REPLY_DELETE = "我整理了一条删除，请你确认。"
 
 # 工具参数始终不合格时返回的正文与错误码
@@ -313,6 +314,8 @@ _FALLBACK_BY_TOOL: dict[str, str] = {
     "update_task": FALLBACK_REPLY_UPDATE,
     "create_expense": FALLBACK_REPLY_EXPENSE,
     "delete_task": FALLBACK_REPLY_DELETE,
+    "update_expense": FALLBACK_REPLY_UPDATE,
+    "delete_expense": FALLBACK_REPLY_DELETE,
 }
 
 # 草稿的 action_type 与工具名现在同名，但这是两套命名空间：
@@ -321,6 +324,8 @@ _TOOL_BY_ACTION: dict[str, str] = {
     "update_task": "update_task",
     "create_expense": "create_expense",
     "delete_task": "delete_task",
+    "update_expense": "update_expense",
+    "delete_expense": "delete_expense",
 }
 
 
@@ -392,6 +397,15 @@ def _build_llm_messages(
         if row.status != "ok" or row.role not in ("user", "assistant"):
             continue
         if row.tool_calls:
+            # 带工具调用的行不能原样回灌：DeepSeek 要求 tool_calls 后面必须紧跟
+            # role=tool 的回复，少一条就直接 400。但也不能整条丢掉 —— 真机会话 130
+            # 就是被这个「跳过」坑的：模型只看见自己说过「我整理了一条修改，请你确认。」，
+            # 完全不知道自己上一轮调的是 update_expense；接下来用户说「把 7 块那笔删掉」，
+            # 它顺着惯性又调了一次 update_expense（而且是改 126 号的金额）。
+            # 换成一句说明：模型知道自己真的做过什么，才不会把上一轮的动作当成当前意图。
+            names = _tool_names_of(row.tool_calls)
+            note = _TOOL_CALL_NOTE.format(names=names) if names else _TOOL_CALL_NOTE_GENERIC
+            messages.append({"role": "assistant", "content": note})
             continue
         text = (row.content or "").strip()
         if not text or text == _NO_REPLY:
@@ -410,6 +424,32 @@ def _build_llm_messages(
 
 
 _CARD_NOTE = "（这一轮你已经发过确认卡，用户还没确认）"
+
+# 带工具调用的历史行替换成的说明。见 `_build_llm_messages` 里 `row.tool_calls` 分支。
+_TOOL_CALL_NOTE = "（这一轮你调用过工具：{names}；结果已经交给用户确认）"
+_TOOL_CALL_NOTE_GENERIC = "（这一轮你调用过工具；结果已经交给用户确认）"
+
+
+def _tool_names_of(raw: Any) -> str:
+    """从 `tool_calls` JSON 里拼出工具名，逗号分隔、去重、保持顺序。
+
+    `tool_calls` 是取自模型的原始结构（平铺的 `{"name": ...}`，见
+    `action_schema.parse_tool_calls`），形状不确定也不要抛：拿不到就返回空串，
+    调用方会退回通用说明。历史拼装一旦抛异常，整个对话都发不出去。
+    """
+    if not isinstance(raw, list):
+        return ""
+    names: list[str] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if not isinstance(name, str):
+            inner = item.get("function")
+            name = inner.get("name") if isinstance(inner, dict) else None
+        if isinstance(name, str) and name and name not in names:
+            names.append(name)
+    return "、".join(names)
 
 
 def _with_card_note(text: str, card: object | None) -> str:
