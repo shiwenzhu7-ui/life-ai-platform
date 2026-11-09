@@ -39,9 +39,15 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from core.errors import AppError, not_found
-from core.time import BEIJING, now_beijing, now_utc, to_utc_naive
-from modules.lifeweb.ai.action_schema import CreateTaskPayload, ToolDraft
+from core.time import BEIJING, now_beijing, now_utc, to_beijing_iso, to_utc_naive
+from modules.lifeweb.ai.action_schema import (
+    UPDATABLE_TASK_FIELDS,
+    CreateTaskPayload,
+    ToolDraft,
+    UpdateTaskPayload,
+)
 from modules.lifeweb.ai.models import ChatSession, PendingAction
+from modules.lifeweb.tasks import crud as tasks_crud
 from modules.shared.categories.model import Category
 
 logger = logging.getLogger(__name__)
@@ -165,15 +171,16 @@ def _lookup_category_id(db: Session, scope: str, category_name: str) -> int:
     return int(category_id)
 
 
-# 动作类型 → categories.scope。现在只有 create_task；
+# 动作类型 → categories.scope。现在两个动作都落在 task 域；
 # 加 create_expense 时这里加一行（`"create_expense": "expense"`），其余函数都不用改
-_SCOPE_BY_ACTION: dict[str, str] = {"create_task": "task"}
+_SCOPE_BY_ACTION: dict[str, str] = {"create_task": "task", "update_task": "task"}
 
 # 动作类型 → 能写进业务表的东西。现在只有一个字段：
 #   entity        写到哪个表的什么域（决定分类要按哪个 scope 再校验一次）
 #   parse_payload 把（可能被用户改过的）dict 重新验成一棵可信对象
 ACTION_SPECS: dict[str, dict[str, Any]] = {
     "create_task": {"entity": "task", "parse_payload": CreateTaskPayload},
+    "update_task": {"entity": "task", "parse_payload": UpdateTaskPayload},
 }
 
 
@@ -217,6 +224,11 @@ def build_preview(action_type: str, payload: dict) -> dict:
     1. 前端不用做时区换算 —— 浏览器时区和用户预期不一定一致；
     2. **三天后再看这张卡，显示的仍是当时那句话的意思**。前端现算的话，
        时间一过「明天」就变了，用户会以为自己记的是后天。
+
+    改待办多一件事：`update_task` 的 payload 里有一份 `before`（改之前的样子），
+    那是给用户判断用的 ——「把买牛奶改到明天」这张卡，光看「明天」没法确认
+    改的是不是对的那条，必须能看见「现在：10月31日 15:00」。
+    所以 before 里也要补同样的可读文本，否则卡片两栏一边中文一边 ISO 字符串。
     """
     preview = dict(payload)
     preview["due_at_text"] = format_due_text(payload.get("due_at"))
@@ -224,7 +236,41 @@ def build_preview(action_type: str, payload: dict) -> dict:
     preview["priority_text"] = PRIORITY_TEXT.get(priority, priority)
     if "category_id" not in preview:
         preview["category_id"] = UNCATEGORIZED_ID
+
+    before = payload.get("before")
+    if isinstance(before, dict):
+        preview["before"] = {
+            **before,
+            "due_at_text": format_due_text(before.get("due_at")),
+            "priority_text": PRIORITY_TEXT.get(before.get("priority"), before.get("priority")),
+        }
     return preview
+
+
+def task_before(db: Session, user_id: int, task_id: Any) -> dict:
+    """取一条待办「改之前的样子」，写进草稿的 before 字段。
+
+    三个用途，缺一个都不行：
+
+    1. **卡片上能证明改的是哪一条**：用户看到「买牛奶 / 现在 10月31日」才敢点确认。
+       模型给错 id 时，这一栏会显示成另一条待办的名字 —— 用户一眼就能看出来。
+    2. **执行时能算出真正的 diff**：用户可能在卡片上只改了时间，
+       标题和分类沿用 before 里的原值，不会被误写成 None。
+    3. **找不到就是 404**：`task_id` 越权或不存在，草稿根本不该建出来。
+
+    时间用 `to_beijing_iso` 转成 +08:00 的字符串：卡片的 payload 是一个 JSON 字段，
+    存不进 datetime 对象，也不该存 naive UTC（前端拿到会显示成 UTC）。
+    """
+    task = tasks_crud.get_for_user(db, user_id, task_id)
+    if task is None:
+        raise not_found("要修改的待办不存在")
+    return {
+        "task_id": task.id,
+        "title": task.title,
+        "due_at": to_beijing_iso(task.due_at),
+        "priority": task.priority,
+        "category_id": task.category_id,
+    }
 
 
 # ---------- 创建 ----------
@@ -248,7 +294,30 @@ def create_draft(
     本来就该得到两张卡；真正需要幂等的是「确认」那一下，键在前端请求头里（第 5 步）。
     """
     payload = dict(draft.payload)
-    payload["category_id"] = resolve_category_id(db, draft.action_type, payload.get("category_name"))
+
+    if draft.action_type == "update_task":
+        # 改待办要有「改之前」：卡片上能证明改的是哪条，执行时能算 diff。
+        # 找不到这条待办（id 不存在 / 是别人的）在这里就 404 ——
+        # 不能建一张注定点不动或改错行的卡。
+        before = task_before(db, user_id, payload.get("task_id"))
+        payload = {
+            **before,
+            **{key: value for key, value in payload.items() if key in UPDATABLE_TASK_FIELDS},
+            "before": before,
+        }
+
+    if "category_name" in payload:
+        payload["category_id"] = resolve_category_id(
+            db, draft.action_type, payload.get("category_name")
+        )
+    elif draft.action_type == "update_task":
+        # 模型没说分类：沿用这条待办现在的分类，不要落成 0（「未分类」）。
+        # 上面的 `{**before, ...}` 里已经有 before["category_id"] 了，
+        # 但紧随其后的 `if "category_name" in payload` 分支在模型给了分类名时
+        # 会覆盖它 —— 那时以新名字查出来的 id 才是对的。走到 else 说明没给名字，
+        # 这时把 before 的 category_id 明确写回，别让它依赖字典合并的副作用。
+        before_again = payload.get("before") or {}
+        payload["category_id"] = before_again.get("category_id") or UNCATEGORIZED_ID
 
     action = PendingAction(
         user_id=user_id,
@@ -439,6 +508,17 @@ def prepare_payload(
 
     model = spec["parse_payload"]
     stored = action.payload or {}
+
+    if action.action_type == "update_task":
+        data = _prepare_update(model, stored, override)
+        data["category_id"] = _category_id_from(
+            db,
+            action,
+            data.get("category_name"),
+            override.get("category_id") if override else None,
+        )
+        return data
+
     raw = {key: value for key, value in stored.items() if key in model.model_fields}
     if override:
         for key in model.model_fields:
@@ -460,6 +540,51 @@ def prepare_payload(
     return data
 
 
+def _prepare_update(
+    model: type, stored: dict, override: dict[str, Any] | None
+) -> dict:
+    """改待办的 payload 合成：把「改之前」和「改成什么」拼成一份完整字段集。
+
+    与新增的区别在于**空值语义**：新增时 `due_at: None` 就是「没有截止时间」；
+    改的时候 `due_at: None` 只表示「这次不改时间」，必须回填成原值 ——
+    否则用户说「把标题改一下」，模型没提时间，待办的截止日就被清空了。
+
+    所以这里的规则是：
+
+        before[字段]      打底（原值）
+        override 显式给的  覆盖（用户在前端改的）
+        都没有            保持原值
+
+    最后整体过一遍 `UpdateTaskPayload`：用户改出来的空标题、坏时间同样不放过。
+    """
+    before = dict(stored.get("before") or {})
+    merged = {name: before.get(name) for name in UPDATABLE_TASK_FIELDS if before.get(name) is not None}
+
+    if override:
+        for name in UPDATABLE_TASK_FIELDS:
+            if name in override and override[name] is not None:
+                merged[name] = override[name]
+    else:
+        # 没有 override：用草稿里模型真正给出的那些改动项
+        for name in UPDATABLE_TASK_FIELDS:
+            if stored.get(name) is not None:
+                merged[name] = stored[name]
+
+    # 分类名要和「改之前的名字」比一比才知道有没有变。payload 顶层的
+    # category_name 可能是从 before 带过来的（模型没说分类时等于原样），
+    # 那种情况下不该重查，也就不会把 category_id 带歪。
+    if merged.get("category_name") == before.get("category_name"):
+        merged.pop("category_name", None)
+
+    merged["task_id"] = stored.get("task_id") or before.get("task_id")
+    try:
+        validated = model(**merged)
+    except Exception as exc:  # pydantic 的 ValidationError，但别让它走 500
+        raise AppError(CODE_BAD_PAYLOAD, f"修改内容不合法：{_short(exc)}", 422) from exc
+
+    return validated.model_dump(mode="json")
+
+
 def _category_id_from(
     db: Session,
     action: PendingAction,
@@ -479,12 +604,42 @@ def _category_id_from(
             return UNCATEGORIZED_ID
 
     stored = action.payload or {}
-    if category_name and category_name != stored.get("category_name"):
+
+    if action.action_type == "update_task":
+        return _category_id_for_update(db, action, stored, category_name)
+
+    if category_name is not None and category_name != stored.get("category_name"):
         # 用户把分类名改了：以新名字为准，重新查一次
         scope = _SCOPE_BY_ACTION.get(action.action_type)
         if scope is not None:
             return _lookup_category_id(db, scope, category_name)
+
     return stored.get("category_id") or UNCATEGORIZED_ID
+
+
+def _category_id_for_update(
+    db: Session, action: PendingAction, stored: dict, category_name: str | None
+) -> int:
+    """改待办该用哪个分类 id。
+
+    比较基准必须是 **before（这条待办此刻的分类）**，不能是 payload 顶层的
+    `category_name` —— 后者在 `create_draft` 里已经被写成「模型这次要改成的名字」，
+    拿它来比永远是「没变化」，改了分类也没人重查（这是本函数存在的全部原因）。
+
+    三档：
+
+        名字跟原值不同 → 按新名字重查（用户/模型确实换了分类）
+        名字没给       → 沿用 before 的 id
+        名字等于原值   → 也沿用 before 的 id（没有理由再查一次）
+    """
+    before = stored.get("before") if isinstance(stored.get("before"), dict) else {}
+    original_name = before.get("category_name")
+    scope = _SCOPE_BY_ACTION.get(action.action_type)
+
+    if category_name is not None and category_name != original_name and scope is not None:
+        return _lookup_category_id(db, scope, category_name)
+
+    return before.get("category_id") or UNCATEGORIZED_ID
 
 
 def _short(exc: Exception, limit: int = 200) -> str:

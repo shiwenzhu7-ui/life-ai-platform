@@ -36,8 +36,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 from core.db import Base
 
 # 与数据库里的 ENUM 定义严格一致。新增动作类型要同时改这里和数据库 ENUM
+# （Alembic 不会自动改 MySQL 的 ENUM，必须手写迁移，见 a7 那一版）
 PENDING_ACTION_TYPES = (
     "create_task",
+    "update_task",
     "create_expense",
     "add_shopping_item",
     "create_shopping_list",

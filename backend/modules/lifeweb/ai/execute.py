@@ -31,13 +31,13 @@ from typing import Any, Callable
 
 from sqlalchemy.orm import Session
 
-from core.errors import AppError
+from core.errors import AppError, not_found
 from core.time import now_utc
 from modules.lifeweb.ai import pending
 from modules.lifeweb.ai.models import PendingAction
 from modules.lifeweb.ai.pending import CODE_EXPIRED, CODE_REJECTED
 from modules.lifeweb.tasks import crud as tasks_crud
-from modules.lifeweb.tasks.schema import TaskCreate
+from modules.lifeweb.tasks.schema import TaskCreate, TaskUpdate
 
 
 @dataclass
@@ -168,6 +168,39 @@ def _write_task(db: Session, user_id: int, payload: dict) -> dict[str, Any]:
     return {"type": "task", "id": task.id}
 
 
+def _write_update(db: Session, user_id: int, payload: dict) -> dict[str, Any]:
+    """update_task → 改一条已存在的待办。返回摘要。
+
+    **归属校验在这里，不在模型给的 id 上**。`payload["task_id"]` 是模型从
+    查询结果里抄来的数字 —— 抄错行、或者干脆编一个，都要在这里拦下来：
+    用 `get_for_user(db, user_id, task_id)` 查，查不到就是 404。
+    模型看不见别的用户的数据，但「相信模型给的 id」这个习惯本身就是漏洞。
+
+    分类同样二次校验：`_confirmed_category_id` 会确认它在 task 域里还活着。
+
+    改动项来自 `prepare_payload` 已经拼好的完整字段集（原值 + 改动），
+    这里只负责翻译成 `TaskUpdate`。`status` 不在里面 ——
+    「把这条标成完成」不在本轮的改动范围，它要联动 completed_at，走看板。
+    """
+    task = tasks_crud.get_for_user(db, user_id, int(payload["task_id"]))
+    if task is None:
+        raise not_found("要修改的待办不存在")
+
+    updated = tasks_crud.update(
+        db,
+        task,
+        TaskUpdate(
+            title=payload.get("title"),
+            category_id=_confirmed_category_id(db, "task", payload.get("category_id")),
+            priority=payload.get("priority") or "medium",
+            due_at=_as_datetime(payload.get("due_at")),
+        ),
+        # 与「卡片置 confirmed」同事务，理由见模块 docstring 第 2 条
+        commit=False,
+    )
+    return {"type": "task", "id": updated.id}
+
+
 def _as_datetime(value: Any):
     """payload 里的 due_at 是 ISO 字符串（model_dump(mode="json") 出来的）。"""
     if not value:
@@ -180,6 +213,7 @@ def _as_datetime(value: Any):
 # 动作类型 → 写入函数。加 create_expense 时在这里加一行，`confirm` 不用改
 _WRITERS: dict[str, Callable[[Session, int, dict], dict[str, Any]]] = {
     "create_task": _write_task,
+    "update_task": _write_update,
 }
 
 

@@ -9,8 +9,12 @@
 
 工具分两类，这条界线比什么都重要：
 
-- **写入类**（`create_task`）：产出一张待确认卡片，用户点确认才落库。
+- **写入类**（`create_task` / `update_task`）：产出一张待确认卡片，用户点确认才落库。
 - **只读类**（`query_tasks`）：立刻执行、结果回灌给模型继续说话，不落库、无卡片。
+
+`update_task` 的存在顺带解释了为什么要先有 `query_tasks`：
+模型必须能**先查到那条待办的真实 id**，才谈得上改它。它的参数里
+`task_id` 是必填的 —— 模型不许靠猜 id 改数据。
 
 字段名与 `tasks/model.py`、`tasks/schema.py`、`docs/数据库设计.md` 保持同名
 （title / due_at / priority），全链路一个词，读代码时不用在脑子里做映射。
@@ -125,8 +129,61 @@ QUERY_TASKS: dict = {
     },
 }
 
+UPDATE_TASK: dict = {
+    "type": "function",
+    "function": {
+        "name": "update_task",
+        # 四层之外多一条硬规则：**先查后改**。模型最容易犯的错是
+        # 拿着上下文里记得的编号直接改 —— 那个编号要么过期，要么根本不存在。
+        "description": (
+            "修改一条已存在的待办。"
+            "用户说「把买牛奶那条改到明天」「交房租的优先级调高」「那条待办改名」时调用。"
+            "task_id 必须来自 query_tasks 的查询结果，不要凭记忆或猜测填写；"
+            "不知道是哪一条时，先调用 query_tasks 找到它。"
+            "只传要改的字段，没提到的字段保持原样。"
+            "用户明确要求新建一条时用 create_task，不要用这个。"
+            "调用后只能说「我整理了一条修改，请你确认」，绝不能说你已经改好了。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "要改的待办 id，必须来自 query_tasks 的结果里的 id=…",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "新的标题，15 字以内。用户没提要改名就不要传",
+                },
+                "due_at": {
+                    "type": "string",
+                    "description": (
+                        "新的截止时间，ISO 8601 带时区偏移，"
+                        "例如 2026-11-09T15:00:00+08:00。用户没提时间就不要传"
+                    ),
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                    "description": "新的优先级。用户没提就不要传",
+                },
+                "category_name": {
+                    "type": "string",
+                    "description": (
+                        "新的分类名，只能从系统提示词里列出的分类中选。用户没提就不要传"
+                    ),
+                },
+            },
+            "required": ["task_id"],
+            # 只改不建：这里没有 status 字段，勾选完成走看板，不走对话
+            "additionalProperties": False,
+        },
+    },
+}
+
 # 顺序固定：以后加工具就往后追加，测试与请求体都依赖这个顺序稳定
-ALL_TOOLS: list[dict] = [CREATE_TASK, QUERY_TASKS]
+ALL_TOOLS: list[dict] = [CREATE_TASK, QUERY_TASKS, UPDATE_TASK]
 
 # 只读工具名：tool_flow 据此分流 —— 这批立刻执行并回灌，不产生待确认卡片
 READ_ONLY_TOOLS: frozenset[str] = frozenset({"query_tasks"})

@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from modules.lifeweb.tasks.schema import Priority, _clean_title
 
@@ -52,10 +52,13 @@ def _one_line(exc: Exception) -> str:
     return str(exc).strip().splitlines()[0][:200] if str(exc).strip() else type(exc).__name__
 
 # 工具名 → 数据库 ai_pending_actions.action_type 的 ENUM 值。
-# 现在两个词恰好一样（create_task），但这层映射必须显式写出来：
+# 现在两个词恰好一样（create_task / update_task），但这层映射必须显式写出来：
 # 工具名是给模型看的（贴近用户说法），ENUM 是对齐表结构的。
 # 明天加 `record_expense` 工具时，ENUM 仍是 `create_expense`，靠这里翻译。
-ACTION_TYPE_BY_TOOL: dict[str, str] = {"create_task": "create_task"}
+ACTION_TYPE_BY_TOOL: dict[str, str] = {
+    "create_task": "create_task",
+    "update_task": "update_task",
+}
 
 # 一次回复里最多采纳几份草稿。
 # A5 取 1：一句话说两件事时，模型可能一次交两个 call；多卡确认要改响应结构、
@@ -107,8 +110,68 @@ class CreateTaskPayload(BaseModel):
         return value
 
 
+# 改待办时「允许模型改变」的字段。没有 status（勾完成是另一件事）、
+# 没有 description（用户很少在对话里改描述，先不给口子）、
+# 更没有 user_id / id / created_at —— 那些不是「内容」。
+UPDATABLE_TASK_FIELDS: tuple[str, ...] = ("title", "due_at", "priority", "category_name")
+
+
+class UpdateTaskPayload(BaseModel):
+    """update_task 的草稿：一条已存在待办的「改成什么」。
+
+    `task_id` 是模型从 `query_tasks` 结果里抄来的编号。**它只是线索，不是授权**：
+    真正写表前 `execute._write_update` 会拿当前用户的 id 再查一遍，
+    查不到就 404 —— 模型抄错行、或者编个 id 出来的，在这里拦不住，在那边拦得住。
+
+    至少要有变化项：只给 task_id 等于「我想改但不知道改什么」，
+    点确认什么都不会发生，不如当校验失败重试一次。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: int = Field(ge=1)
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    due_at: datetime | None = None
+    priority: Priority | None = None
+    category_name: str | None = Field(default=None, max_length=32)
+
+    @field_validator("title")
+    @classmethod
+    def title_not_blank(cls, value: str | None) -> str | None:
+        return value if value is None else _clean_title(value)
+
+    @field_validator("due_at")
+    @classmethod
+    def due_at_sane(cls, value: datetime | None) -> datetime | None:
+        # 与 create_task 同一套规则（必须带时区、年份合理），不另写一份
+        return CreateTaskPayload.due_at_sane(value)
+
+    @model_validator(mode="after")
+    def at_least_one_change(self) -> "UpdateTaskPayload":
+        if not any(getattr(self, name) is not None for name in UPDATABLE_TASK_FIELDS):
+            raise ValueError("至少要说清楚改什么（标题 / 时间 / 优先级 / 分类 里的一项）")
+        return self
+
+    def changes(self) -> dict[str, Any]:
+        """只吐出真的给了值的字段 —— `None` 表示「没说要改」，不是「改成空」。
+
+        与 tasks 的 PATCH 三态不同：这里不支持「清空时间」。
+        把一条待办的时间改成空（＝不再有截止日）在对话里极难表达清楚，
+        模型说「那个时间不要了」到底是清空还是改期，人和模型的理解常常不同 ——
+        这种改动留给看板手点，对话里先只做「改成某个值」。
+        """
+        return {
+            name: getattr(self, name)
+            for name in UPDATABLE_TASK_FIELDS
+            if getattr(self, name) is not None
+        }
+
+
 # 工具名 → 校验模型。加写入工具时在这里加一行，`parse_tool_calls` 不用改
-PAYLOAD_MODELS: dict[str, type[BaseModel]] = {"create_task": CreateTaskPayload}
+PAYLOAD_MODELS: dict[str, type[BaseModel]] = {
+    "create_task": CreateTaskPayload,
+    "update_task": UpdateTaskPayload,
+}
 
 # 一次查询最多返回几条。与 tools.py 里 limit 的 maximum 是同一个数：
 # 那边是说明书（写给模型看），这边是闸门（模型不听也拦得住）。
@@ -355,6 +418,8 @@ __all__ = [
     "QueryTasksPayload",
     "READ_PAYLOAD_MODELS",
     "ToolDraft",
+    "UPDATABLE_TASK_FIELDS",
+    "UpdateTaskPayload",
     "parse_read_call",
     "parse_tool_calls",
 ]

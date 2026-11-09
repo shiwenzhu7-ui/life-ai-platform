@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -53,6 +54,10 @@ _ERROR_MAX = 500
 # 助手消息的回退正文：模型只调工具、一个字都没说时，气泡里不能是空白
 # （前端 v-for 渲染 null 会报错；而且用户需要知道「卡片是怎么来的」）
 FALLBACK_REPLY = "我整理了一条待办，请你确认。"
+
+# 改动类草稿的兜底正文。不能复用上面那句：「我整理了一条待办」在
+# 改待办时是**假话** —— 用户会以为多出来了一条，而不是某一条被改了。
+FALLBACK_REPLY_UPDATE = "我整理了一条修改，请你确认。"
 
 # 工具参数始终不合格时返回的正文与错误码
 MALFORMED_REASON = "模型给出的工具参数不合格，这一轮没有生成待确认卡片，请再试一次。"
@@ -189,7 +194,7 @@ def _apply_reply(msg: ChatMessage, reply: LLMReply, *, failed: bool) -> None:
     if content:
         msg.content = content
     elif reply.tool_calls:
-        msg.content = FALLBACK_REPLY
+        msg.content = _fallback_for(reply.tool_calls)
     else:
         msg.content = "(无回复)"
     msg.tool_calls = reply.tool_calls or None
@@ -197,6 +202,26 @@ def _apply_reply(msg: ChatMessage, reply: LLMReply, *, failed: bool) -> None:
     msg.token_out = reply.token_out
     msg.latency_ms = reply.latency_ms
     msg.status = "failed" if failed else "ok"
+
+
+def _fallback_for(tool_calls: list[dict[str, Any]]) -> str:
+    """按工具名挑一句兜底正文。
+
+    模型常常交了 tool_calls 却一个字不说。此时气泡总得有句话，
+    但话不能瞎说：产出「新建待办」草稿时和「改一条待办」时说的一句话不一样。
+
+    tool_call 的形状有两种：DeepSeek 原始协议是扁平`{"id","name","arguments"}`），
+    OpenAI 风格是嵌套的（`{"function": {"name": ...}}`）。两种都认，
+    否则线上和假 provider 会用上不一样的那句话。
+    """
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            continue
+        function = call.get("function") if isinstance(call.get("function"), dict) else {}
+        name = function.get("name") or call.get("name")
+        if name == "update_task":
+            return FALLBACK_REPLY_UPDATE
+    return FALLBACK_REPLY
 
 
 def _resolve_session(

@@ -257,7 +257,7 @@ def create(
     return task
 
 
-def update(db: Session, task: Task, payload: TaskUpdate) -> Task:
+def update(db: Session, task: Task, payload: TaskUpdate, *, commit: bool = True) -> Task:
     """局部更新一条。
 
     核心是 `exclude_unset=True`：只吐出「请求体里真的出现过」的字段。
@@ -267,6 +267,10 @@ def update(db: Session, task: Task, payload: TaskUpdate) -> Task:
 
     注意不能直接用 payload.__dict__ 或 model_dump()：
     那会把没传的字段也当成 None 写回去，一次改标题就把描述清空了。
+
+    `commit=False` 是给 AI 确认卡片用的（同 `create`）：改动必须和
+    「卡片置 confirmed」在同一个事务里提交，否则会留下「改成功了、
+    卡片还能再点一次」的重复窗口。
     """
     changes = payload.model_dump(exclude_unset=True)
 
@@ -275,8 +279,11 @@ def update(db: Session, task: Task, payload: TaskUpdate) -> Task:
             value = to_utc_naive(value)  # 入库前统一转 naive UTC
         setattr(task, key, value)
 
-    db.commit()
-    db.refresh(task)  # due_at 等列的类型由数据库确认后再返回给前端
+    if commit:
+        db.commit()
+        db.refresh(task)  # due_at 等列的类型由数据库确认后再返回给前端
+    else:
+        db.flush()
     return task
 
 
