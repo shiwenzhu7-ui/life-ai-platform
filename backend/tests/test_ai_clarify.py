@@ -65,3 +65,41 @@ def test_tool_declarations_are_still_json_clean():
     """提示词里的引号/换行不能把工具声明弄成非法 JSON（要原样发给 DeepSeek）。"""
     payload = json.dumps(ALL_TOOLS, ensure_ascii=False)
     assert json.loads(payload) == ALL_TOOLS
+
+
+# ---------- 优先级规则（C 方案：可解释的三档，不凭感觉） ----------
+
+
+def _priority_desc() -> str:
+    return CREATE_TASK["function"]["parameters"]["properties"]["priority"]["description"]
+
+
+def test_priority_rule_is_explainable():
+    desc = _priority_desc()
+    assert "3 天内" in desc and "high" in desc
+    assert "更远" in desc and "medium" in desc
+    assert "没有任何时间" in desc and "low" in desc
+
+
+def test_priority_defers_to_explicit_user_words():
+    desc = _priority_desc()
+    assert "很急" in desc and "不急" in desc, "用户明说时必须以用户为准"
+
+
+def test_priority_is_never_asked():
+    """优先级不用问用户 —— 否则又回到「一个一个问」的老路。"""
+    assert "不用问" in _priority_desc()
+
+
+def test_priority_enum_still_matches_model():
+    """三档枚举必须和 tasks 模型的 PRIORITIES 一致，否则写了也存不进去。"""
+    from modules.lifeweb.tasks.model import TASK_PRIORITIES
+
+    enum = CREATE_TASK["function"]["parameters"]["properties"]["priority"]["enum"]
+    assert tuple(enum) == tuple(TASK_PRIORITIES)
+
+
+def test_update_task_priority_has_no_ask_demand():
+    """update 的 priority 是「用户没提就不要传」，不能被出卡规则污染。"""
+    params = _tool("update_task")["parameters"]["properties"]
+    assert "没提就不要传" in params["priority"]["description"]

@@ -16,11 +16,11 @@ cd backend
 3. **表结构以模型为准**：session 开始时 `drop_all` + `create_all`，不跑 Alembic。
    改了模型不用写迁移就能跑测试；但迁移本身仍要单独验证（`alembic check`）。
 
-## 覆盖范围（373 条）
+## 覆盖范围（377 条）
 
 | 文件 | 数量 | 覆盖 |
 |---|---|---|
-| `test_ai_clarify.py` | 7 | 信息不全时「一次问全」这条产品要求钉成断言：提示词里有这条规则、真正发出去的 system 文本里也有、问过一轮就出卡（默认值兜底）、create_expense 只把 amount 设为必填而 account 不许写成「没提就问」、工具声明仍是合法 JSON |
+| `test_ai_clarify.py` | 12 | 信息不全时「一次问全」这条产品要求钉成断言：提示词里有这条规则、真正发出去的 system 文本里也有、问过一轮就出卡（默认值兜底）、create_expense 只把 amount 设为必填而 account 不许写成「没提就问」、工具声明仍是合法 JSON；外加优先级三档规则（3 天内 high / 更远 medium / 没时间 low、用户明说为准、不用问用户、枚举与 `TASK_PRIORITIES` 一致、update_task 的 priority 不被污染） |
 | `test_ai_tools.py` | 16 | 工具声明可 json 序列化且中文不转义、结构合 OpenAI 规范（type/description/required 与 properties 对得上/additionalProperties=False）、名字唯一、TOOL_NAMES 一致、create_task 只有 title 必填、参数名与 tasks 模块同名词、priority 枚举与库一致、模块常量不被调用方改动 |
 | `test_ai_parse.py` | 34 | 解析成功（全字段/只给标题补默认/strip/JSON 可序列化/frozen）、坏数据一律丢弃不抛（坏 JSON、代码块、数组、字符串、None、空标题、超长、缺 title、时间不带时区、年份 0206/2260、枚举外优先级、自加字段、未知工具名、非 dict call）、坏的不挡好的、多条只取第一、action_type 映射与 payload 字段与 tools 声明三方一致 |
 | `test_ai_pending.py` | 32 | 分类名换 id（系统分类/按 task 域隔离/未知或空回落 0/软删分类/未知动作类型）、可读时间（北京时间、Z 与 +00:00 归一、一周内补星期、无效字符串不抛）、preview 补字段且不改入参、create_draft 写 pending 行且 expires_at 落在 30 分钟内、只 flush 不 commit、重复建两张卡、确认前 tasks 表零写入、get_pending 越权或不存在 404、过期置 expired 并 410、已确认仍可读、状态机矩阵（重复确认不覆盖、已取消或已过期改不动、过期未置位也确认不了）、expires_at 为 naive UTC |
