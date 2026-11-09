@@ -63,6 +63,10 @@ FALLBACK_REPLY_UPDATE = "我整理了一条修改，请你确认。"
 # 卡片上写的却是「待办」，会让人以为 AI 记错了地方。
 FALLBACK_REPLY_EXPENSE = "我整理了一笔账，请你确认。"
 
+# 删除类草稿的兜底正文。「我整理了一条待办」在这里更糟：用户会以为要新建，
+# 点下去却删掉了一条 —— 所以必须明说是删除，而且要和卡片上的红按钮对得上。
+FALLBACK_REPLY_DELETE = "我整理了一条删除，请你确认。"
+
 # 工具参数始终不合格时返回的正文与错误码
 MALFORMED_REASON = "模型给出的工具参数不合格，这一轮没有生成待确认卡片，请再试一次。"
 
@@ -257,11 +261,16 @@ def _fallback_for_tool(tool_name: str | None) -> str:
 _FALLBACK_BY_TOOL: dict[str, str] = {
     "update_task": FALLBACK_REPLY_UPDATE,
     "create_expense": FALLBACK_REPLY_EXPENSE,
+    "delete_task": FALLBACK_REPLY_DELETE,
 }
 
 # 草稿的 action_type 与工具名现在同名，但这是两套命名空间：
 # 以后某个工具可能产出两种动作（例如 create_shopping_list → 既有清单又有条目）。
-_TOOL_BY_ACTION: dict[str, str] = {"update_task": "update_task", "create_expense": "create_expense"}
+_TOOL_BY_ACTION: dict[str, str] = {
+    "update_task": "update_task",
+    "create_expense": "create_expense",
+    "delete_task": "delete_task",
+}
 
 
 def _resolve_session(

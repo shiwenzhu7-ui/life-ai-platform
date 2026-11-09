@@ -61,6 +61,7 @@ ACTION_TYPE_BY_TOOL: dict[str, str] = {
     "create_task": "create_task",
     "update_task": "update_task",
     "create_expense": "create_expense",
+    "delete_task": "delete_task",
 }
 
 # 一次回复里最多采纳几份草稿。
@@ -239,11 +240,39 @@ class CreateExpensePayload(BaseModel):
         return value
 
 
+class DeleteTaskPayload(BaseModel):
+    """delete_task 的草稿：删哪一条、为什么删。
+
+    只有两个字段，但 `task_id` 的地位和 update_task 一样 —— **线索，不是授权**。
+    真正删除前 `pending.confirm_action` 的 write 回调会拿当前用户的 id 再查一遍，
+    模型抄错行或编个不存在的 id，都过不去。
+
+    `reason` 只进卡片给人看，不进数据库：它没有业务价值，写进去只是多一列要维护。
+
+    没有「批量」字段，也不打算加：一次回复最多采纳一份草稿（MAX_DRAFTS_PER_REPLY = 1），
+    批量删除在这里连表达都表达不了 —— 这是故意的。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: int = Field(ge=1)
+    reason: str | None = Field(default=None, max_length=60)
+
+    @field_validator("reason")
+    @classmethod
+    def blank_reason_means_none(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+
 # 工具名 → 校验模型。加写入工具时在这里加一行，`parse_tool_calls` 不用改
 PAYLOAD_MODELS: dict[str, type[BaseModel]] = {
     "create_task": CreateTaskPayload,
     "update_task": UpdateTaskPayload,
     "create_expense": CreateExpensePayload,
+    "delete_task": DeleteTaskPayload,
 }
 
 # 一次查询最多返回几条。与 tools.py 里 limit 的 maximum 是同一个数：
@@ -568,6 +597,7 @@ __all__ = [
     "MAX_QUERY_LIMIT",
     "CreateExpensePayload",
     "CreateTaskPayload",
+    "DeleteTaskPayload",
     "QUERYABLE_STATUS",
     "QueryExpensesPayload",
     "QueryTasksPayload",

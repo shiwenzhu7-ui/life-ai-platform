@@ -7,7 +7,7 @@
     </header>
 
     <dl class="pa-card__fields">
-      <template v-for="field in fields">
+      <template v-for="field in shownFields">
         <dt :key="field.key + '-k'" class="pa-card__label">{{ field.label }}</dt>
         <dd :key="field.key + '-v'" class="pa-card__value">{{ field.value }}</dd>
       </template>
@@ -17,13 +17,13 @@
       <!-- 只在还能操作时出现按钮：已确认 / 已取消 / 已过期的卡不该让人再点 -->
       <template v-if="actionable">
         <el-button
-          type="primary"
+          :type="confirmButtonType"
           size="small"
           :loading="busy === 'confirm'"
           :disabled="busy !== ''"
           @click="onConfirm"
         >
-          确认创建
+          {{ confirmText }}
         </el-button>
         <el-button
           size="small"
@@ -98,6 +98,8 @@ export default {
     cardTitle() {
       return {
         create_task: '新建待办',
+        update_task: '修改待办',
+        delete_task: '删除待办',
         create_expense: '记一笔支出',
         add_shopping_item: '加入购物清单'
       }[this.action.action_type] || '待确认操作'
@@ -105,17 +107,30 @@ export default {
     iconClass() {
       return {
         create_task: 'el-icon-document-add',
+        update_task: 'el-icon-edit-outline',
+        delete_task: 'el-icon-delete',
         create_expense: 'el-icon-money',
         add_shopping_item: 'el-icon-shopping-cart-2'
       }[this.action.action_type] || 'el-icon-warning-outline'
     },
+    // 删除是不可逆的：按钮做成红色，文案说「删除」而不是「确认创建」。
+    // 卡片上因此不能只写「确认」—— 用户点之前得知道这一下会发生什么。
+    isDelete() {
+      return this.action.action_type === 'delete_task'
+    },
+    confirmButtonType() {
+      return this.isDelete ? 'danger' : 'primary'
+    },
+    confirmText() {
+      return this.isDelete ? '删除' : '确认创建'
+    },
     statusText() {
       return {
         pending: '待确认',
-        confirmed: '已创建',
+        confirmed: this.isDelete ? '已删除' : '已创建',
         cancelled: '已取消',
         expired: '已过期',
-        confirming: '提交中…',
+        confirming: this.isDelete ? '删除中…' : '提交中…',
         cancelling: '处理中…'
       }[this.busy || this.status] || this.status
     },
@@ -134,6 +149,25 @@ export default {
       }
       return out
     },
+    // 删除卡显示的是「要删的那条长什么样」（后端 payload.gone 快照）。
+    // 不能只显示理由：「你说删买菜」和「真的要删的是买菜」是两件事，
+    // 模型抄错 id 时，这一栏会露出另一条待办的名字 —— 那是用户唯一的逃生机会。
+    deleteFields() {
+      const gone = this.preview.gone || {}
+      const out = []
+      if (gone.title) out.push({ key: 'gone-title', label: '要删除', value: gone.title })
+      if (gone.due_at_text) out.push({ key: 'gone-due', label: '时间', value: gone.due_at_text })
+      if (gone.priority_text) {
+        out.push({ key: 'gone-priority', label: '优先级', value: gone.priority_text })
+      }
+      if (this.preview.reason) {
+        out.push({ key: 'reason', label: '原因', value: this.preview.reason })
+      }
+      return out
+    },
+    shownFields() {
+      return this.isDelete ? this.deleteFields : this.fields
+    },
     expireText() {
       const raw = this.action.expires_at
       if (!raw) return ''
@@ -141,6 +175,13 @@ export default {
       return `${String(raw).slice(0, 10)} ${String(raw).slice(11, 16)} 前有效`
     },
     resultText() {
+      if (this.isDelete) {
+        return {
+          confirmed: '已删除，这条待办不会出现在列表里',
+          cancelled: '已取消，待办还在',
+          expired: '超过 30 分钟未处理，已失效'
+        }[this.status] || ''
+      }
       return {
         confirmed: '已按这张卡创建完成',
         cancelled: '已取消，没有写入任何数据',
@@ -149,7 +190,9 @@ export default {
     },
     // V1.0 的待办只有列表页（没有 /tasks/:id 详情路由），所以链到列表。
     // `created_id` 由页面在确认成功后回填（接口只在确认那一次返回它）。
+    // 删除卡不显示这个链接：那条待办刚被删掉，点进去只会看到「列表里没有它」。
     createdLink() {
+      if (this.isDelete) return null
       return this.status === 'confirmed' && this.action.created_id ? '/tasks' : null
     }
   },

@@ -313,7 +313,7 @@ def change_status(db: Session, task: Task, status: str) -> Task:
     return task
 
 
-def soft_delete(db: Session, task: Task) -> None:
+def soft_delete(db: Session, task: Task, *, commit: bool = True) -> None:
     """软删除 —— 只写 deleted_at，不执行 DELETE 语句。
 
     为什么不真删（三条理由都跟「以后还要查」有关）：
@@ -321,8 +321,13 @@ def soft_delete(db: Session, task: Task) -> None:
       2. 记录无痕消失，出了问题没法复现
       3. 误删无法恢复
 
+    `commit=False` 是给 AI 确认卡用的：删除必须和「卡片置 confirmed」同一个事务，
+    否则会出现「待办删了、卡片还挂在 pending」这种对不上账的状态。
+    默认 True 保持原行为，页面上的 DELETE 接口一行都不用改。
+
     不返回 Task：接口回 204，没有响应体。
     调用方（router）已经用它查过一次，那条记录在本次事务里是活的。
     """
     task.deleted_at = now_utc()
-    db.commit()
+    if commit:
+        db.commit()

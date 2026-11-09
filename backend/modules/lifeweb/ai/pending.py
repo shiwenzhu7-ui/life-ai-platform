@@ -45,6 +45,7 @@ from modules.lifeweb.ai.action_schema import (
     UPDATABLE_TASK_FIELDS,
     CreateExpensePayload,
     CreateTaskPayload,
+    DeleteTaskPayload,
     ToolDraft,
     UpdateTaskPayload,
 )
@@ -184,6 +185,9 @@ _SCOPE_BY_ACTION: dict[str, str] = {
     # 记一笔查的是 expense 域的分类：「购物」在 task 域是 18、在 expense 域是 3，
     # 查错域不会报错，只会把这笔账悄悄记到别的分类名下 —— 错得最难发现。
     "create_expense": "expense",
+    # 删除不需要分类（任务卡上只是把原分类显示出来），但表里得有这一行：
+    # 少一行就会走到 resolve_category_id 的「未知动作」分支，只记一条 warning 收场
+    "delete_task": "task",
 }
 
 # 动作类型 → 能写进业务表的东西。现在只有一个字段：
@@ -193,6 +197,7 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
     "create_task": {"entity": "task", "parse_payload": CreateTaskPayload},
     "update_task": {"entity": "task", "parse_payload": UpdateTaskPayload},
     "create_expense": {"entity": "expense", "parse_payload": CreateExpensePayload},
+    "delete_task": {"entity": "task", "parse_payload": DeleteTaskPayload},
 }
 
 
@@ -258,6 +263,14 @@ def build_preview(action_type: str, payload: dict) -> dict:
             **before,
             "due_at_text": format_due_text(before.get("due_at")),
             "priority_text": PRIORITY_TEXT.get(before.get("priority"), before.get("priority")),
+        }
+
+    gone = payload.get("gone")
+    if isinstance(gone, dict):
+        preview["gone"] = {
+            **gone,
+            "due_at_text": format_due_text(gone.get("due_at")),
+            "priority_text": PRIORITY_TEXT.get(gone.get("priority"), gone.get("priority")),
         }
     return preview
 
@@ -341,6 +354,18 @@ def create_draft(
             **before,
             **{key: value for key, value in payload.items() if key in UPDATABLE_TASK_FIELDS},
             "before": before,
+        }
+
+    if draft.action_type == "delete_task":
+        # 删除最需要「证据」：改错了还能再改回来，删错了用户只能去库里捞。
+        # 这张卡的 payload 以一条**快照**为主 —— 卡上会把要删的那条待办完整摆出来。
+        # 找不到（id 不存在 / 是别人的 / 已经软删）就在这里 404，
+        # 绝不建一张点下去会删错东西的卡。
+        gone = task_before(db, user_id, payload.get("task_id"))
+        payload = {
+            "task_id": gone["task_id"],
+            "reason": payload.get("reason"),
+            "gone": gone,
         }
 
     if "category_name" in payload:
@@ -565,6 +590,23 @@ def prepare_payload(
             override.get("category_id") if override else None,
         )
         return data
+
+    if action.action_type == "delete_task":
+        # 删除只认 task_id（+ 可选的 reason）：
+        #   - 模型当初没给 task_id、库里又被谁改坏了 → 422，让人重新发起
+        #   - override 里塞 category_id / title 之类，一律被 extra="forbid" 挡下
+        # 不给「换个 id 删」的口子 —— 用户想删另一条，应该重新跟助手说一句。
+        raw = {key: value for key, value in stored.items() if key in model.model_fields}
+        if override:
+            # 这一条**不能按 model_fields 挑**：挑完只剩合法字段，
+            # extra="forbid" 就永远不触发，前端塞个 task_id 进来就能换个对象删。
+            # 删除没有任何「可改字段」，所以一个字都不许透传。
+            raise AppError(CODE_BAD_PAYLOAD, "删除确认卡不支持修改内容，请直接确认或取消", 422)
+        try:
+            validated = model(**raw)
+        except Exception as exc:  # pydantic 的 ValidationError，但别让它走 500
+            raise AppError(CODE_BAD_PAYLOAD, f"删除内容不合法：{_short(exc)}", 422) from exc
+        return validated.model_dump(mode="json")
 
     raw = {key: value for key, value in stored.items() if key in model.model_fields}
     if override:

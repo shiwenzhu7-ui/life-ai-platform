@@ -9,8 +9,8 @@
 
 工具分两类，这条界线比什么都重要：
 
-- **写入类**（`create_task` / `update_task` / `create_expense`）：产出一张待确认卡片，
-  用户点确认才落库。
+- **写入类**（`create_task` / `update_task` / `create_expense` / `delete_task`）：
+  产出一张待确认卡片，用户点确认才落库。
 - **只读类**（`query_tasks` / `query_expenses`）：立刻执行、结果回灌给模型继续说话，
   不落库、无卡片。
 
@@ -318,6 +318,44 @@ QUERY_EXPENSES: dict = {
     },
 }
 
+DELETE_TASK: dict = {
+    "type": "function",
+    "function": {
+        "name": "delete_task",
+        # 与 update_task 一样是「先查后删」，另外多一条：**删只删一条**。
+        # 用户说「把这几条都删了」时，模型应当一次只提一条，让用户逐张确认 ——
+        # 一次删五条只要有一张卡理解错了，用户就要花五分钟去查哪条没了。
+        "description": (
+            "删除一条已存在的待办。"
+            "只在用户明确要求删掉某条待办时调用，例如「把买菜那条删了」「这条不用了，删掉」。"
+            "task_id 必须来自 query_tasks 的查询结果，不要凭记忆或猜测填写；"
+            "不知道是哪一条时，先调用 query_tasks 找到它；找不到就如实说没找到，不要自己编一个。"
+            "用户说「把这几条都删了」时，一次只提一条，等用户确认后再提下一条。"
+            "用户只是说「做完了」「不用了」但没说要删时，用 update_task 改状态，不要删。"
+            "调用后只能说「我整理了一条删除，请你确认」，绝不能说你已经删掉了。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "要删的待办 id，必须来自 query_tasks 的结果里的 id=…",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "为什么要删，一句话，比如「买完了」「记错了」。"
+                        "会显示在确认卡上，帮用户核对。用户没说就不用传"
+                    ),
+                },
+            },
+            "required": ["task_id"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 # 顺序固定：以后加工具就往后追加，测试与请求体都依赖这个顺序稳定
 ALL_TOOLS: list[dict] = [
     CREATE_TASK,
@@ -325,6 +363,7 @@ ALL_TOOLS: list[dict] = [
     UPDATE_TASK,
     CREATE_EXPENSE,
     QUERY_EXPENSES,
+    DELETE_TASK,
 ]
 
 # 只读工具名：tool_flow 据此分流 —— 这批立刻执行并回灌，不产生待确认卡片

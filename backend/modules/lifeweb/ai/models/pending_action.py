@@ -40,6 +40,7 @@ from core.db import Base
 PENDING_ACTION_TYPES = (
     "create_task",
     "update_task",
+    "delete_task",
     "create_expense",
     "add_shopping_item",
     "create_shopping_list",

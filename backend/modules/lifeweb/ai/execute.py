@@ -240,6 +240,32 @@ def _write_expense(db: Session, user_id: int, payload: dict) -> dict[str, Any]:
     return {"type": "expense", "id": expense.id}
 
 
+def _write_delete(db: Session, user_id: int, payload: dict) -> dict[str, Any]:
+    """delete_task → 软删一条待办（只写 deleted_at，不执行 DELETE）。返回摘要。
+
+    为什么是软删：见 `tasks.crud.soft_delete` 的 docstring —— 统计要算得出来、
+    出错能复现、误删还有救。这条代码路径把「软删」这个决定固化在 AI 侧：
+    对话里说「删掉」，等于页面上点删除，走的是同一个函数。
+
+    **归属校验和 update 一样在这里**，并且比出卡时更严：卡片可能在屏幕上躺了
+    二十分钟，这期间用户可能已经在页面上把它删了 —— 那时 `get_for_user`
+    查出来是 None，这里回 404「要删除的待办不存在，可能已经删过了」，
+    而不是默默成功一次空操作。
+
+    不写 `result` 之外的任何东西：删了就是删了，没有「撤销」按钮。
+    卡片本身会保留 `gone` 快照，所以事后还能看到「当时删的是哪一条」。
+    """
+    task_id = int(payload["task_id"])
+    task = tasks_crud.get_for_user(db, user_id, task_id)
+    if task is None:
+        raise not_found("要删除的待办不存在，可能已经删过了")
+
+    # 与「卡片置 confirmed」同事务：commit=False，由 confirm_action 最后统一提交。
+    # 中途任何一步抛错，卡片仍是 pending、待办仍在，用户可以再点一次。
+    tasks_crud.soft_delete(db, task, commit=False)
+    return {"type": "task", "id": task.id, "deleted": True}
+
+
 def _as_datetime(value: Any):
     """payload 里的 due_at 是 ISO 字符串（model_dump(mode="json") 出来的）。"""
     if not value:
@@ -254,6 +280,7 @@ _WRITERS: dict[str, Callable[[Session, int, dict], dict[str, Any]]] = {
     "create_task": _write_task,
     "update_task": _write_update,
     "create_expense": _write_expense,
+    "delete_task": _write_delete,
 }
 
 
