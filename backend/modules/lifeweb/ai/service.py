@@ -42,7 +42,7 @@ from modules.lifeweb.ai.models import ChatMessage, ChatSession, PendingAction
 from modules.lifeweb.ai.prompts import build_system_prompt
 from modules.lifeweb.ai.provider import LLMError, LLMProvider, LLMReply
 from modules.lifeweb.ai.schema import DEFAULT_TITLE
-from modules.lifeweb.ai.tool_flow import run_tool_flow
+from modules.lifeweb.ai.tool_flow import run_tool_flow, tools_available
 
 # 最近多少条消息进上下文（一轮 = 用户 + 助手，所以 20 条 ≈ 10 轮）
 HISTORY_LIMIT = 20
@@ -78,6 +78,14 @@ FALLBACK_FAILED = "（这次没能生成待确认卡片）"
 # 这一轮模型又想出卡，但会话里已经有一张没确认的卡，新卡没建（真机会话 82）。
 # 不能说「我整理了…请你确认」—— 用户会在这条消息底下找卡，而卡在更上面那条。
 FALLBACK_SUPPRESSED = "上面那张卡还在等你确认；确认或取消之后，再说新的事。"
+
+# 模型嘴上说「我整理了一条待办/一笔账」，服务端补问一次之后它仍然没调用工具。
+# 这时候正文里那句承诺是**假话**：底下没有卡，库里也没东西。换掉它，说事实。
+# 为什么不直接留模型原文：用户会以为已经记好了，等他回过味来，那件事早就忘了。
+FALLBACK_NOT_SAVED = (
+    "这次没记下来：上面那句话不是真的，底下没有卡片，数据也没有写入。"
+    "你可以再说一次（说清要做什么、什么时候），我重新整理。"
+)
 
 
 @dataclass
@@ -124,11 +132,15 @@ def chat(
         _record_summary_usage(db, session, user_id, summary)
 
     categories = crud.system_categories(db)
+    # tools_enabled 同时决定两件事：系统提示词里有没有工具规则、请求里发不发工具声明。
+    # 两处必须用同一个值 —— 提示词说有工具而请求里没有，模型只能假装调用（A4 的坑）。
+    tools_enabled = settings.llm_tools_enabled and tools_available(provider)
     llm_messages = _build_llm_messages(
         history,
         categories=categories,
         summary=session.summary,
         cards=crud.pending_by_message(db, user_id, [row.id for row in history]),
+        tools_enabled=tools_enabled,
     )
 
     # 助手这一行先落库拿到 id：草稿要挂在它下面（「这张卡是哪句话产生的」），
@@ -154,6 +166,7 @@ def chat(
             user_id=user_id,
             session=session,
             message_id=assistant.id,
+            tools_enabled=tools_enabled,
         )
     except LLMError as exc:
         db.rollback()  # 丢掉那条 content 为空的助手行和可能的草稿
@@ -177,12 +190,25 @@ def chat(
         failed=not flow.ok,
         draft_action_type=flow.pending.action_type if flow.pending is not None else None,
     )
-    if flow.suppressed:
-        # 这一轮模型又想出卡，但会话里已经有一张待确认的卡，所以没建新的。
+    if flow.suppressed and flow.nudged:
+        # 补问之后模型**还是**发旧的那件事 —— 用户要的新事没提出来。
+        # 这时不能说「上面那张卡还在等你确认」：用户会以为只是旧卡挡着，
+        # 实际是他要记的那件事根本没被整理。直说没记下来。
+        assistant.content = FALLBACK_NOT_SAVED
+        assistant.error_message = (
+            f"{flow.rejection}；补问一次后仍然是旧的那件事"
+        )
+    elif flow.suppressed:
+        # 这一轮模型又想出卡，但会话里已经有一张同样的待确认卡，所以没建新的。
         # 它的正文大概率还是「我整理了一条待办，请你确认」—— 用户会去找卡，
         # 结果上面那张早就有了，只是没显示在这条消息底下。把正文改掉。
         assistant.content = FALLBACK_SUPPRESSED
         assistant.error_message = flow.rejection
+    elif flow.nudged and flow.pending is None:
+        # 模型许诺「请你确认」却没调工具，服务端补问一次之后它还是没调（或信息不够）。
+        # 那句承诺必须换成实话 —— 否则用户以为卡在下面，实际什么都没有。
+        assistant.content = FALLBACK_NOT_SAVED
+        assistant.error_message = "模型说了要整理，但没有真的调用工具（已补问一次）"
     if not flow.ok:
         assistant.content = flow.reply.content or FALLBACK_FAILED
         assistant.error_message = flow.error_message
@@ -331,6 +357,7 @@ def _build_llm_messages(
     categories: dict[str, list[str]] | None = None,
     summary: str | None = None,
     cards: dict[int, object] | None = None,
+    tools_enabled: bool = True,
 ) -> list[dict]:
     """拼成 OpenAI 兼容的 messages 数组。
 
@@ -350,7 +377,7 @@ def _build_llm_messages(
         {
             "role": "system",
             "content": build_system_prompt(
-                now_beijing(), categories=categories, tools_enabled=True
+                now_beijing(), categories=categories, tools_enabled=tools_enabled
             ),
         }
     ]

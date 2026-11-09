@@ -502,7 +502,7 @@ def _parse_one(call: dict[str, Any]) -> ToolDraft | None:
     )
 
 
-def parse_tool_calls(reply: Any) -> list[ToolDraft]:
+def parse_tool_calls(reply: Any, *, skip: Any = None) -> list[ToolDraft]:
     """从 LLMReply 里解析草稿，最多返回 `MAX_DRAFTS_PER_REPLY` 个。
 
     参数写成 `Any` 而不是 `LLMReply`：测试里可以传一个只有 `tool_calls`
@@ -510,6 +510,11 @@ def parse_tool_calls(reply: Any) -> list[ToolDraft]:
 
     **只解析写入类工具**。query_tasks 不在这里出现：它不发卡片、不落库，
     走 `parse_read_call` 那条路。
+
+    `skip` 是一个 `(action_type, payload) -> bool` 的判定函数：返回 True 的草稿
+    直接丢弃。用它来避开**同一件事又被发一遍**——真机会话 118 里模型一口气交了
+    两个调用：先是重新发一遍已经挂着的「买水果」，第二个才是用户新要的「去银行」。
+    截断在前 1 个的话，用户要的那件事就凭空消失了。
 
     返回空列表表示「这次没有可用草稿」—— 调用方应当把模型的 content 当普通回复显示。
     """
@@ -523,8 +528,12 @@ def parse_tool_calls(reply: Any) -> list[ToolDraft]:
             logger.warning("丢弃工具调用：call 不是对象 | %r", call)
             continue
         draft = _parse_one(call)
-        if draft is not None:
-            drafts.append(draft)
+        if draft is None:
+            continue
+        if skip is not None and skip(draft.action_type, draft.payload):
+            logger.info("跳过重复的草稿：%s", draft.action_type)
+            continue
+        drafts.append(draft)
 
     if len(drafts) > MAX_DRAFTS_PER_REPLY:
         logger.info(

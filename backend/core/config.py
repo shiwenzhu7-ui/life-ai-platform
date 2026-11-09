@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     # 比记 0 更糟（看起来像账单，实际是猜的）。要用就按官网当天价格填 .env。
     llm_price_in_per_mtok: float = 0.0
     llm_price_out_per_mtok: float = 0.0
+    # 工具调用总开关（A5 起）。关掉之后：请求里不发 tools、提示词里不讲工具规则，
+    # 退回 A4 的「纯聊天」形态 —— 一句话就能把「AI 乱建待办」这类事故刹住，
+    # 不用回滚代码。默认开。
+    llm_tools_enabled: bool = True
 
     @property
     def llm_ready(self) -> bool:

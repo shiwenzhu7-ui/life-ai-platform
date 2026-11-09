@@ -436,6 +436,83 @@ def open_drafts(
     return list(db.scalars(stmt).all())
 
 
+# 草稿里能用来判断「是不是同一件事」的字段。create_task / update_task / delete_task 看 title，
+# create_expense 看 amount + category_name：同一笔账再记一遍，金额和分类都不会变。
+_SAME_BY_TITLE = frozenset({"create_task", "update_task", "delete_task"})
+
+
+def _norm_title(text: object) -> str:
+    """比较标题用的规范形：去掉所有空白、转小写。
+
+    「买 水果」和「买水果」是同一件事；中文没有词边界，空白只可能是朗读/输入习惯。
+    """
+    return "".join(str(text or "").split()).lower()
+
+
+def _subject_of(action_type: str, payload: dict) -> tuple:
+    """从草稿 payload 里取「这件事是什么」的指纹。
+
+    只在**同一 action_type** 之间比较（拿删除和新建比没有意义），
+    所以返回的元组第一项不放进指纹里，由调用方比对类型。
+    """
+    if action_type in _SAME_BY_TITLE:
+        title = payload.get("title")
+        if not title:
+            gone = payload.get("gone")
+            title = gone.get("title") if isinstance(gone, dict) else None
+        return (_norm_title(title),)
+    if action_type == "create_expense":
+        return (str(payload.get("amount") or ""), _norm_title(payload.get("category_name")))
+    return ()
+
+
+def is_same_item(action_type: str, new_payload: dict, existing: PendingAction) -> bool:
+    """这一张新卡是不是「上面那张卡」的重复（同一件事又被发了一遍）。
+
+    448075a 的教训：模型在用户随便闲聊一句之后，会把已经发过的卡原样再发一次。
+    那种情况下**不该建第二张**。但用户换了一件事（「帮我记个待办：去银行」）时，
+    用户的意图是明确的，拦下来就等于把他要的事吞掉了（真机会话 116）。
+
+    判据尽量粗：只比较类型 + 标题（或金额+分类）。宁可把「改了措辞的同一件事」
+    当成新事（建新卡、旧卡过期，用户在屏幕上仍然只看到一张可点的卡），
+    也不要把「两件真的不同的事」当成重复（那会让用户的话消失）。
+    """
+    if existing.action_type != action_type:
+        return False
+    old = _subject_of(action_type, existing.payload or {})
+    new = _subject_of(action_type, new_payload or {})
+    if not old or not new:
+        return False
+    return old == new
+
+
+def expire_open_drafts(
+    db: Session, user_id: int, session_id: int, *, exclude_message_id: int | None = None
+) -> int:
+    """把会话里还挂着的旧卡标成 expired，返回置位的行数。
+
+    用在「用户又要记另一件事」时：新卡盖住旧卡，屏幕上只留一张还能点的。
+    **不删行**：卡片状态是历史（用户后来问「我刚才那张卡呢」要答得出来），
+    标 expired 与「它自己过期」是同一个终态，读路径不用多一条分支。
+
+    不用 `db.commit()`：调用方（tool_flow → service）在一个事务里，
+    新建草稿、置位旧卡、写用量必须一起成功。
+    """
+    stmt = (
+        update(PendingAction)
+        .where(
+            PendingAction.user_id == user_id,
+            PendingAction.session_id == session_id,
+            PendingAction.status == "pending",
+        )
+        .values(status="expired")
+    )
+    if exclude_message_id is not None:
+        stmt = stmt.where(PendingAction.message_id != exclude_message_id)
+    result = db.execute(stmt)
+    return int(result.rowcount or 0)
+
+
 def _get_owned(db: Session, user_id: int, action_id: int) -> PendingAction:
     """按 id 取本人名下的动作；别人的 / 不存在的统一 404。
 
@@ -842,8 +919,10 @@ __all__ = [
     "confirm_action",
     "create_draft",
     "entity_category_id",
+    "expire_open_drafts",
     "format_due_text",
     "get_pending",
+    "is_same_item",
     "mark_cancelled",
     "mark_confirmed",
     "open_drafts",

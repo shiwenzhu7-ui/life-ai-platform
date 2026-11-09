@@ -46,6 +46,13 @@ service 的职责是「一次问答的事务边界」，这段是「一次问答
 
 `MAX_DRAFTS_PER_REPLY == 1`：一次只接一张卡。模型嘴上说「我不调工具」
 却仍然带了 tool_calls，那就按调用走（`has_calls` 优先）—— 以行为为准，不以措辞为准。
+
+7. **「只说不做」的补救：用户明确让记，模型只在正文里许诺、没调工具时，补问一次。**
+   真机会话 85/86/87：它写下「我整理了一条待办，请你确认」，底下却没有卡片，
+   数据也没写入 —— 用户以为记好了。提示词规则 7 压不住这种漂移，所以放在服务端兜：
+   只在**用户这句明确下令记东西**（`tools.WRITE_INTENT`）时判定，
+   只补**一次**（`nudged`），补问后仍无卡就把正文换成「这次没记下来」的实话。
+   代价：极少数轮多一次模型调用（失败的那一条消息里也有据可查）。
 """
 
 from __future__ import annotations
@@ -69,7 +76,13 @@ from modules.lifeweb.ai.models import ChatSession, PendingAction
 from modules.lifeweb.ai import pending as pending_mod
 from modules.lifeweb.ai.pending import create_draft, resolve_category_id
 from modules.lifeweb.ai.provider import LLMError, LLMProvider, LLMReply, merge_replies
-from modules.lifeweb.ai.tools import ALL_TOOLS, READ_ONLY_TOOLS, TOOL_NAMES
+from modules.lifeweb.ai.tools import (
+    ALL_TOOLS,
+    READ_ONLY_TOOLS,
+    TOOL_NAMES,
+    WRITE_INTENT,
+    WRITE_TOOLS,
+)
 from modules.lifeweb.expenses import crud as expenses_crud
 from modules.lifeweb.tasks import crud as tasks_crud
 from modules.shared.money import money
@@ -123,6 +136,14 @@ class ToolFlow:
     """这一轮模型想出卡，但因为会话里已经有一张待确认的卡，没有建新的。
     调用方据此改写正文 —— 否则用户看着「请你确认」却找不到卡。"""
 
+    nudged: bool = False
+    """这一轮触发过「只说不做」补问（模块注释第 7 条）。
+    调用方据此把正文换成实话，并在补问仍无果时说明数据没写入。"""
+
+    suppressed_titles: tuple[str, ...] = ()
+    """被拦下的那一轮里，会话中已经挂着的卡都有哪些「标题」。
+    用来判断用户这句是不是在说**另一件事**（见 `_origin_is_new_task`）。"""
+
     @property
     def error_message(self) -> str | None:
         """给助手消息的 error_message 列用。"""
@@ -152,21 +173,26 @@ def run_tool_flow(
     user_id: int,
     session: ChatSession,
     message_id: int,
+    tools_enabled: bool = True,
 ) -> ToolFlow:
     """最多 3 轮：调模型 → 有只读调用就执行并回灌 → 有写入调用就落草稿。
 
     `message_id` 是**本次助手回复**的消息 id，草稿挂在它下面，用来回答
     「这张卡是哪句话产生的」。注意它必须是已经 flush 过的行（有 id）。
 
+    `tools_enabled=False`（或 provider 不支持 tools）时是纯聊天：工具声明一栏都不发，
+    也不会为「只说不做」多问一次 —— 系统提示词本来就没告诉模型有工具。
+
     轮次的结束条件（按优先级）：
 
-    1. 模型没给 tool_calls → 这就是最终回复（绝大多数对话第 1 轮就结束）
+    1. 模型没给 tool_calls → 这就是最终回复（绝大多数对话第 1 轮就结束）；
+       例外：用户明确让记东西、模型却只说不做，补问一次（模块注释第 7 条）
     2. 有写入调用（create_task）→ 落草稿、立刻停。**不等模型再补一句**：
        卡片本身就是回答，再问一次只是多花钱
     3. 只有只读调用 → 执行、把结果拼进 messages，进入下一轮
     4. 轮数用尽（MAX_ROUNDS）→ 停，用最后一次的 content
     """
-    tools = ALL_TOOLS if tools_available(provider) else None
+    tools = ALL_TOOLS if (tools_enabled and tools_available(provider)) else None
 
     convo: list[dict] = list(messages)
     reads: list[dict] = []
@@ -174,6 +200,10 @@ def run_tool_flow(
     rejection: str | None = None
     replies: list[LLMReply] = []
     last_reply: LLMReply | None = None
+    nudged = False
+    # 用户这一轮的原话：判断「是不是明确下令记东西」用（见 _claims_write）。
+    # 在 convo 被补问改动之前取下来，之后不再变。
+    origin = _last_user_text(messages)
 
     while rounds < MAX_ROUNDS:
         rounds += 1
@@ -187,6 +217,7 @@ def run_tool_flow(
                 rejection=exc.message,
                 rounds=rounds,
                 reads=reads,
+                nudged=nudged,
             )
         replies.append(reply)
         last_reply = reply
@@ -194,29 +225,60 @@ def run_tool_flow(
         calls = _as_calls(reply)
         if not calls:
             # 没有工具调用就是最终回复。注意「上一轮查过、这一轮没补 tool_calls」
-            # 也走这里 —— 正文可能为空，service 用 FALLBACK_REPLY 兜底
+            # 也走这里 —— 正文可能为空，service 用 FALLBACK_REPLY 兜底。
+            #
+            # 唯一的例外：用户明确让记东西，它却没调工具、只在正文里许诺。
+            # 用户会去找卡，而底下什么都没有。补问一次，只补一次。
+            if (
+                not reads
+                and tools is not None
+                and not nudged
+                and rounds < MAX_ROUNDS
+                and _claims_write(reply, origin)
+            ):
+                convo = _nudge_messages(convo)
+                nudged = True
+                continue
             break
 
         read_calls = [c for c in calls if c.get("name") in READ_ONLY_TOOLS]
-        write_calls = [c for c in calls if c.get("name") not in READ_ONLY_TOOLS]
+        write_calls = [c for c in calls if c.get("name") in WRITE_TOOLS]
+        other_calls = [
+            c for c in calls if c.get("name") not in (READ_ONLY_TOOLS | WRITE_TOOLS)
+        ]
 
-        if write_calls:
+        if write_calls or other_calls:
             # 写入优先：这一轮只要申请了 create_task，就按原来的 A5 逻辑走，
-            # 同一条回复里顺带的 query 调用直接丢掉（模型拿到卡片就够说话了）
+            # 同一条回复里顺带的 query 调用直接丢掉（模型拿到卡片就够说话了）。
+            # 认不出的工具名也交给写入分支：那里会判「没救了」，一次就返回。
+            keep = write_calls or other_calls
             flow = _finish_write(
                 db,
                 provider,
                 convo,
                 tools,
-                _with_calls(reply, write_calls),
+                _with_calls(reply, keep),
                 user_id=user_id,
                 session=session,
                 message_id=message_id,
+                allow_suppress=not nudged,
             )
             # token 要把前面几轮的查询也算上，只记最后一轮会少记一大截
             flow.reply = merge_replies([*replies[:-1], flow.reply])
             flow.rounds = rounds
             flow.reads = reads
+            flow.nudged = nudged
+            if flow.suppressed and _origin_is_new_task(origin, flow.suppressed_titles):
+                # 模型把**已经挂着的那件事**又发了一遍，而用户这句明显在说另一件事
+                # （会话 118/120：用户要「去银行」，模型第二次还是发「买水果」）。
+                # 直接把「上面那张卡还在等你确认」丢给用户，他要的事就消失了。
+                # 再补问一次，并把「用户这次说的是什么」点明，让它重新提卡。
+                if not nudged and rounds < MAX_ROUNDS:
+                    convo = _nudge_messages(convo, hint=_redoS_hint(origin, flow.reply), origin=origin)
+                    nudged = True
+                    continue
+                # 补问也救不回来：至少别让正文说谎
+                flow.nudged = True
             return flow
 
         # 只有只读调用：执行、回灌、继续下一轮
@@ -239,7 +301,152 @@ def run_tool_flow(
         ok=True,
         rounds=rounds,
         reads=reads,
+        nudged=nudged,
     )
+
+
+# ---------- 「只说不做」的补救（模块注释第 7 条） ----------
+
+# 正文里出现这些词，说明它嘴上在许诺写入/删除，实际一个工具都没调。
+# 只放**名词/动作**，不放「帮你」「好的」这类寒暄词 —— 闲聊里也会出现。
+_WRITE_CLAIM_WORDS = (
+    "待办",
+    "一笔账",
+    "这笔账",
+    "记了账",
+    "记一笔",
+    "删除",
+    "待确认",
+    "记着",
+    "说一声",
+)
+
+# 补问时塞进最后一条用户消息的说明：给它一个明确的「现在必须调用工具」，
+# 并把四个写入工具各是什么写清楚，免得它翻上面的说明书。
+_NUDGE_HINT = (
+    "（系统提示：你刚才说要记下来，但这一轮没有真的调用工具，"
+    "用户底下一张确认卡片都看不到。现在必须调用工具："
+    "create_task=建待办，create_expense=记一笔账，update_task=改待办，delete_task=删待办。"
+    "信息不够就先用文字反问，不要假装已经记下来。）"
+)
+
+
+def _last_user_text(messages: Sequence[dict]) -> str | None:
+    """这一轮用户说的原话（messages 里最后一条 role=user）。
+
+    取的是**service 拼好的原始 messages**，不是补问之后的 convo ——
+    补问会把系统提示塞进最后一条 user 消息里，再取就不是用户说的话了。
+    """
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            content = message.get("content")
+            return content if isinstance(content, str) else None
+    return None
+
+
+def _claims_write(reply: LLMReply, origin: str | None = None) -> bool:
+    """这次到底该不该补问一次。
+
+    前提：**用户明确下令记东西**（`WRITE_INTENT` 命中用户那句）。用户只是闲聊
+    「我最近在看书」，模型回一段话是对的 —— 这时候补问等于把聊天变成表单。
+
+    在这个前提下，两种输出都算「该调工具却没调」：
+
+    1. 正文空 —— 漏调工具时它经常只吐一个空正文；
+    2. 正文带承诺/答应口吻（`_WRITE_CLAIM_WORDS`）：许诺「请你确认」、
+       或者「记着」「说一声就行」这种话，实际什么都没做。
+    """
+    if not origin or not WRITE_INTENT.search(origin):
+        return False
+    text = (reply.content or "").strip()
+    if not text:
+        return True
+    return any(word in text for word in _WRITE_CLAIM_WORDS)
+
+
+def _nudge_messages(
+    convo: list[dict], hint: str = _NUDGE_HINT, origin: str | None = None
+) -> list[dict]:
+    """把补问提示并进最后一条 user 消息（拷贝后返回，不改原列表）。
+
+    `origin` 只在「重新提卡」那种补问里用：把用户这次的原话再贴一遍，
+    因为模型被历史里同名的旧卡带偏时，光说「必须调用工具」它还会再发旧的那件事。
+    """
+    text = f"{origin}\n{hint}" if origin else hint
+    nudged = list(convo)
+    for index in range(len(nudged) - 1, -1, -1):
+        if nudged[index].get("role") == "user":
+            original = nudged[index].get("content")
+            nudged[index] = {
+                **nudged[index],
+                "content": f"{original}\n{text}" if isinstance(original, str) else text,
+            }
+            return nudged
+    nudged.append({"role": "user", "content": text})
+    return nudged
+
+
+def _titles_of(cards: Sequence[Any]) -> tuple[str, ...]:
+    """会话里那些还挂着的卡，各自在说哪件事。
+
+    取 `payload` 里的标题（记账卡没有标题，退到分类名/金额），
+    空标题直接跳过 —— 空字符串会命中任何一句原话，等于全放行。
+    """
+    titles: list[str] = []
+    for card in cards:
+        payload = getattr(card, "payload", None)
+        if not isinstance(payload, dict):
+            continue
+        title = payload.get("title") or (payload.get("gone") or {}).get("title")
+        if not title:
+            title = payload.get("category_name") or payload.get("amount_text")
+        title = str(title).strip() if title else ""
+        if title:
+            titles.append(title)
+    return tuple(titles)
+
+
+def _origin_is_new_task(origin: str | None, titles: Sequence[str]) -> bool:
+    """用户这句是不是在说**旧卡以外**的另一件事。
+
+    判据只有两条，宁可漏判（少补问一次）也不误判（把用户的话吞掉）：
+
+    1. 这句话本身带「记东西」的意图（`WRITE_INTENT`）；
+    2. 它提到了旧卡标题以外的内容 —— 旧卡标题的词不算「新」，
+       所以「提醒我买水果」在旧卡是「买水果」时不算新事，仍按重复拦下。
+
+    反例（会话 120）：旧卡「买水果」，用户说「帮我记个待办：周五下午三点去银行」
+    —— 命中意图，且「去银行」不是旧卡内容 → 判为新事，值得再问模型一次。
+    """
+    if not origin or not origin.strip():
+        return False
+    if not WRITE_INTENT.search(origin):
+        return False
+    text = origin
+    for title in titles:
+        if title:
+            text = text.replace(title, "")
+    # 去掉旧卡的词之后，还得剩下点像话的内容（去银行 / 交房租 / 体检）
+    return len(text.strip()) >= 4
+
+
+def _redoS_hint(origin: str | None, reply: LLMReply) -> str:
+    """「上一轮你又发了旧的那件事」时用的补问文本。
+
+    和 `_NUDGE_HINT` 的区别：那个是「你没调工具」，这个是「你调了但要发的是旧的」。
+    两个都必须说清楚，否则模型只会把旧卡再发一遍。
+    """
+    said = (reply.content or "").strip()
+    lines = [
+        "（系统提示：你刚才调用工具时，发的是会话里**已经挂着的那件事**，",
+        "不是用户这一句说的事，所以系统把它拦下了。",
+    ]
+    if said:
+        lines.append(f"你当时的回复是：「{said[:80]}」。")
+    if origin:
+        lines.append(f"用户这一次说的是：「{origin.strip()[:120]}」，请按这句话提取新的一条。")
+    lines.append("现在按用户这句话调用一次工具，不要再发旧的那件事。）")
+    return "".join(lines)
 
 
 def _is_hopeless(reply: LLMReply) -> bool:
@@ -298,8 +505,15 @@ def _finish_write(
     user_id: int,
     session: ChatSession,
     message_id: int,
+    allow_suppress: bool = True,
 ) -> ToolFlow:
-    """把这一轮的写入调用变成草稿；参数不合格时按 A5 原规则重试一次。"""
+    """把这一轮的写入调用变成草稿；参数不合格时按 A5 原规则重试一次。
+
+    `allow_suppress=False` 表示这次调用是**服务端补问之后**才出现的（见模块注释第 7 条）。
+    这种情况下不走「同一会话只留一张卡」的拦截 —— 模型的第一次输出里根本没有工具调用，
+    「已有卡」并没有让它少发什么；而用户这句是明确的「帮我记一个」，
+    拦下来只会得到一句「上面那张卡还在等你确认」，他要的那件事就没了。
+    """
     drafts = parse_tool_calls(reply)
     if not drafts:
         # 交了工具调用但参数不合格 → 把错误原文喂回去，让它原地改一次。
@@ -341,21 +555,63 @@ def _finish_write(
     else:
         retried = False
 
-    # 同一会话同时只留一张待确认的卡。已经有卡时不再新建第二张 ——
-    # 用户屏幕上的第一张还没确认，再来一张只是让人多点一次。
+    # 同一会话里还挂着的旧卡（status=pending 且没过期），以及「这张还要不要发」的判据。
+    # 448075a 的起因：用户随口聊天，模型把已经发过的卡原样又发一遍，
+    # 屏幕上多出一张一模一样的卡（会话 82）。
+    #
+    # 但「有卡就一律不建」把真机另一件事吞掉了：会话 116/118 里用户明确说
+    # 「帮我记个待办：周五下午三点去银行」，模型规规矩矩调了工具，
+    # 却被这条规则拦下，回了一句「上面那张卡还在等你确认」。
+    #
+    # 所以按内容区分：
+    #   - 同一类型、同一标题（记账看金额+分类）→ 认为是重复发同一件事，跳过；
+    #   - 明显是另一件事 → 建新卡，并把旧卡标 expired（留痕、可逆、屏幕只留一张）。
+    # 判据做成 `skip` 回调传给 parse_tool_calls：模型常常一口气交两个调用
+    # （先重申旧的那张、再说新的一张，见会话 118），必须在**解析阶段**跳过旧的，
+    # 否则「一次只接一张卡」的截断会先把新卡片踢掉。
     # 用 pending 模块的函数而不是在这里拼 SQL：过期语义（expires_at > now）
     # 只在 pending.py 里定义一次，两边各写一份迟早漂移。
-    # 注意只有**真正的写入工具**才挡：query_* 走的是 _run_read_calls，不会到这里。
     existing = pending_mod.open_drafts(
         db, user_id, session.id, exclude_message_id=message_id
     )
+
+    def _is_duplicate(action_type: str, payload: dict) -> bool:
+        return any(
+            pending_mod.is_same_item(action_type, payload, card) for card in existing
+        )
+
     if existing:
-        return ToolFlow(
-            reply=reply,
-            has_calls=True,
-            retried=retried,
-            suppressed=True,
-            rejection="这一轮没有再出卡：会话里已有一张待确认的卡",
+        drafts = parse_tool_calls(reply, skip=_is_duplicate)
+        if not drafts and allow_suppress:
+            # 要发的全是已经挂着的那些 —— 不建第二张，正文换成实话
+            return ToolFlow(
+                reply=reply,
+                has_calls=True,
+                retried=retried,
+                suppressed=True,
+                suppressed_titles=_titles_of(existing),
+                rejection="这一轮没有再出卡：会话里已有一张同样的待确认卡",
+            )
+        if not drafts and not allow_suppress:
+            # 补问之后模型**还是**把旧的那件事再发一遍：用户要的新事没提出来。
+            # 不能放行（否则屏幕上多出一张和旧卡一模一样的卡），
+            # 也不再补问一次（已经补过了）。交给调用方把正文换成「没记下来」。
+            return ToolFlow(
+                reply=reply,
+                has_calls=True,
+                retried=retried,
+                suppressed=True,
+                suppressed_titles=_titles_of(existing),
+                rejection="这一轮没有再出卡：模型补问后仍然发的是旧的那件事",
+            )
+        # 真的建出一张新卡时，旧卡一律让位（标 expired）：
+        #   - 走到「另一件事」分支：新的那件跟旧的不同，旧卡留着会同时挂两张；
+        #   - 补问之后才建出来的卡：用户当时明确要记另一件事，旧卡如果不让位，
+        #     屏幕上就会出现两张都能点的卡，点哪张都得先想一下
+        #     —— 而这正是 448075a 要治的场景。
+        # 只有「一个草稿都没留下」（上面的两个 return）才不动旧卡。
+        pending_mod.expire_open_drafts(
+            db, user_id, session.id, exclude_message_id=message_id
         )
 
     created = create_draft(

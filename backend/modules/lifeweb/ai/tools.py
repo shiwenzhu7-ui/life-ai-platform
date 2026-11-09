@@ -29,6 +29,8 @@
 
 from __future__ import annotations
 
+import re
+
 CREATE_TASK: dict = {
     "type": "function",
     "function": {
@@ -368,6 +370,18 @@ ALL_TOOLS: list[dict] = [
 
 # 只读工具名：tool_flow 据此分流 —— 这批立刻执行并回灌，不产生待确认卡片
 READ_ONLY_TOOLS: frozenset[str] = frozenset({"query_tasks", "query_expenses"})
+
+# 写入工具名：这批产出一张待确认卡片。与 READ_ONLY_TOOLS 互补而不是互相推导 ——
+# 以后加第三个「既不是查询也不出卡」的工具（比如 set_reminder）时不会被误判成写入。
+WRITE_TOOLS: frozenset[str] = frozenset(
+    {"create_task", "update_task", "create_expense", "delete_task"}
+)
+
+# 用户在**明确下令**记东西（「帮我记一下」「记个待办」「提醒我」）。
+# tool_flow 用它决定「模型没调工具时值不值得再问一次」：
+# 明确下令却漏调，是模型的问题；用户只是闲聊提了一句「我最近在看书」，
+# 补问反而是在把他没想记的东西往库里塞。
+WRITE_INTENT = re.compile(r"(帮我记|记个|记一下|记一笔|记下来|记下|提醒我|帮我加|待办)")
 
 # 模型可能申请一个不存在的工具名（幻觉），用集合一秒判断认不认。
 # frozenset 不可变，也不怕谁 import 之后 append
