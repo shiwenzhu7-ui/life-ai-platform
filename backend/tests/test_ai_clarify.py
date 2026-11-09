@@ -103,3 +103,35 @@ def test_update_task_priority_has_no_ask_demand():
     """update 的 priority 是「用户没提就不要传」，不能被出卡规则污染。"""
     params = _tool("update_task")["parameters"]["properties"]
     assert "没提就不要传" in params["priority"]["description"]
+
+
+# ---------- 反问的边界：问一次，之后不再追（真机上连续四五轮追问「买水果那条」） ----------
+
+
+def test_one_round_is_scoped_to_the_answer():
+    """「一轮」必须定义清楚，否则模型把它理解成「每一轮」。"""
+    rules = "\n".join(TOOL_RULES)
+    assert "问过一轮就够了" in rules
+    assert "用户回应你那次提问的那一条消息" in rules
+
+
+def test_no_asking_again_in_later_turns():
+    """用户换话题就跟着走 —— 这条没了，模型会把上一件事在闲聊里重提一遍。"""
+    rules = "\n".join(TOOL_RULES)
+    assert "不要在之后的话题里翻旧账" in rules
+    assert "换了个话题" in rules
+    assert "水果的事明天再说" in rules, "要把具体句式写进去，泛泛说「别再问」模型不当回事"
+
+
+def test_no_claiming_without_a_real_tool_call():
+    """没调工具就说「我整理了一条待办」→ 用户看不到卡片（真机第 5 轮踩到）。"""
+    rules = "\n".join(TOOL_RULES)
+    assert "想记东西就一定要真的调用工具" in rules
+    assert "代替调用" in rules, "要说清「写这句话不能代替调用」，模型才明白动作在哪"
+    assert "底下却没有卡" in rules
+
+
+def test_no_carryover_rule_in_real_prompt():
+    text = build_system_prompt(now_beijing(), {"task": ["工作"]})
+    assert "翻旧账" in text and "换了个话题" in text
+    assert "想记东西就一定要真的调用工具" in text

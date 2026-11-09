@@ -66,6 +66,7 @@ from modules.lifeweb.ai.action_schema import (
     parse_tool_calls,
 )
 from modules.lifeweb.ai.models import ChatSession, PendingAction
+from modules.lifeweb.ai import pending as pending_mod
 from modules.lifeweb.ai.pending import create_draft, resolve_category_id
 from modules.lifeweb.ai.provider import LLMError, LLMProvider, LLMReply, merge_replies
 from modules.lifeweb.ai.tools import ALL_TOOLS, READ_ONLY_TOOLS, TOOL_NAMES
@@ -117,6 +118,10 @@ class ToolFlow:
     reads: list[dict] = field(default_factory=list)
     """每次只读查询的记录：`{"tool": "query_tasks", "found": 3, "params": {...}}`。
     不进响应、不落库，只用来写日志和测试断言。"""
+
+    suppressed: bool = False
+    """这一轮模型想出卡，但因为会话里已经有一张待确认的卡，没有建新的。
+    调用方据此改写正文 —— 否则用户看着「请你确认」却找不到卡。"""
 
     @property
     def error_message(self) -> str | None:
@@ -336,7 +341,24 @@ def _finish_write(
     else:
         retried = False
 
-    pending = create_draft(
+    # 同一会话同时只留一张待确认的卡。已经有卡时不再新建第二张 ——
+    # 用户屏幕上的第一张还没确认，再来一张只是让人多点一次。
+    # 用 pending 模块的函数而不是在这里拼 SQL：过期语义（expires_at > now）
+    # 只在 pending.py 里定义一次，两边各写一份迟早漂移。
+    # 注意只有**真正的写入工具**才挡：query_* 走的是 _run_read_calls，不会到这里。
+    existing = pending_mod.open_drafts(
+        db, user_id, session.id, exclude_message_id=message_id
+    )
+    if existing:
+        return ToolFlow(
+            reply=reply,
+            has_calls=True,
+            retried=retried,
+            suppressed=True,
+            rejection="这一轮没有再出卡：会话里已有一张待确认的卡",
+        )
+
+    created = create_draft(
         db,
         user_id=user_id,
         session=session,
@@ -346,7 +368,7 @@ def _finish_write(
     return ToolFlow(
         reply=reply,
         draft=drafts[0],
-        pending=pending,
+        pending=created,
         has_calls=True,
         retried=retried,
     )

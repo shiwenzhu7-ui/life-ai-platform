@@ -19,7 +19,7 @@ import pytest
 from conftest import API, new_session
 
 from app import app
-from modules.lifeweb.ai import crud, summary as summary_mod
+from modules.lifeweb.ai import crud, service, summary as summary_mod
 from modules.lifeweb.ai.models import ChatMessage, ChatSession, UsageLog
 from modules.lifeweb.ai.provider import FakeProvider, LLMError, LLMProvider, LLMReply
 from modules.lifeweb.ai.router import get_provider
@@ -335,3 +335,104 @@ def test_build_summary_prompt_merges_old_and_new():
     content = merged[1]["content"]
     assert "旧摘要在这里" in content
     assert "用户：新增一句" in content
+
+
+# ---------- 反问不留痕（真机会话 72：换了话题还说「水果的事明天再说」） ----------
+
+
+def _close_by_turn(client, db, provider):
+    """造一轮「模型反问、用户没回答就换话题」的对话，返回 provider 收到的最后一批 messages。"""
+    session = ChatSession(id=1, user_id=1, title="旧对话", message_count=0)
+    db.add(session)
+    db.flush()
+    crud.add_message(db, user_id=1, session_id=1, role="user", content="提醒我买水果")
+    crud.add_message(
+        db,
+        user_id=1,
+        session_id=1,
+        role="assistant",
+        content="什么时候提醒你？归到哪一类：购物、生活，还是其他？",
+    )
+    db.commit()
+
+    provider.queue(LLMReply(content="那就先歇着吧。"))
+    resp = _chat(client, "今天有点累", session_id=1)
+    assert resp.status_code == 200
+    assert len(provider.calls) == 1
+    return provider.calls[0]["messages"]
+
+
+def test_clarification_is_not_fed_back_to_the_model(client, db, provider):
+    messages = _close_by_turn(client, db, provider)
+    joined = "\n".join(m["content"] for m in messages)
+    assert "什么时候提醒你" not in joined, "反问留在历史里，模型下一轮会接着追"
+    assert "已向用户反问过一次" in joined, "要留一条替换说明，否则历史里凭空少一轮"
+    assert "提醒我买水果" in joined, "用户自己说的话必须保留"
+
+
+def test_user_answers_are_never_treated_as_clarification(client, db, provider):
+    """反向：用户真的回答了，「什么时候提醒你」是模型的话被抹掉，用户的补充照旧进历史。"""
+    messages = _close_by_turn(client, db, provider)
+    user_turns = [m["content"] for m in messages if m["role"] == "user"]
+    assert "今天有点累" in user_turns[-1]
+
+
+def test_clarification_detector_is_conservative():
+    """带问号且短 = 反问；长回复里的问句、没有问号的回复都不算。"""
+    assert service._is_clarification("什么时候提醒你？")
+    assert not service._is_clarification("我整理了一条待办，请你确认。")
+    long_text = "你可以这样做。" + "很长的建议" * 40 + "明白了吗？"
+    assert not service._is_clarification(long_text)
+
+
+# ---------- 已经发过的卡要告诉模型（真机会话 79：一张卡没确认又出一张） ----------
+
+
+def test_pending_card_is_visible_in_history(client, db, provider):
+    session = ChatSession(id=1, user_id=1, title="旧对话", message_count=0)
+    db.add(session)
+    db.flush()
+    crud.add_message(db, user_id=1, session_id=1, role="user", content="提醒我买水果")
+    said = crud.add_message(
+        db, user_id=1, session_id=1, role="assistant", content="我整理了一条待办，请你确认。"
+    )
+    db.flush()
+    from datetime import timedelta
+
+    from core.time import now_utc
+    from modules.lifeweb.ai.models import PendingAction
+
+    db.add(
+        PendingAction(
+            user_id=1,
+            session_id=1,
+            message_id=said.id,
+            action_type="create_task",
+            payload={"title": "买水果"},
+            status="pending",
+            idempotency_key="k1",
+            expires_at=now_utc() + timedelta(minutes=30),
+        )
+    )
+    db.commit()
+
+    provider.queue(LLMReply(content="好"))
+    assert _chat(client, "今天有点累", session_id=1).status_code == 200
+    history_text = "\n".join(m["content"] for m in provider.calls[0]["messages"])
+    assert "你已经发过确认卡" in history_text, "看不见已发的卡，模型会重复出卡"
+
+
+def test_confirmed_card_is_marked_done(client, db, provider):
+    text = service._with_card_note("我整理了一条待办", _FakeCard("confirmed"))
+    assert "已确认" in text
+    assert "你已经发过确认卡" not in text
+
+
+def test_unknown_card_status_leaves_text_alone():
+    assert service._with_card_note("我整理了一条待办", None) == "我整理了一条待办"
+    assert service._with_card_note("我整理了一条待办", _FakeCard("weird")) == "我整理了一条待办"
+
+
+class _FakeCard:
+    def __init__(self, status: str) -> None:
+        self.status = status

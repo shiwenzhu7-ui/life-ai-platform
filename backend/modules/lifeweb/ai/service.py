@@ -75,6 +75,10 @@ MALFORMED_REASON = "模型给出的工具参数不合格，这一轮没有生成
 # 模型两次都交了坏参数、且一个字都没说时，落库的正文（用户刷新后看得见）
 FALLBACK_FAILED = "（这次没能生成待确认卡片）"
 
+# 这一轮模型又想出卡，但会话里已经有一张没确认的卡，新卡没建（真机会话 82）。
+# 不能说「我整理了…请你确认」—— 用户会在这条消息底下找卡，而卡在更上面那条。
+FALLBACK_SUPPRESSED = "上面那张卡还在等你确认；确认或取消之后，再说新的事。"
+
 
 @dataclass
 class ChatTurn:
@@ -121,7 +125,10 @@ def chat(
 
     categories = crud.system_categories(db)
     llm_messages = _build_llm_messages(
-        history, categories=categories, summary=session.summary
+        history,
+        categories=categories,
+        summary=session.summary,
+        cards=crud.pending_by_message(db, user_id, [row.id for row in history]),
     )
 
     # 助手这一行先落库拿到 id：草稿要挂在它下面（「这张卡是哪句话产生的」），
@@ -170,6 +177,12 @@ def chat(
         failed=not flow.ok,
         draft_action_type=flow.pending.action_type if flow.pending is not None else None,
     )
+    if flow.suppressed:
+        # 这一轮模型又想出卡，但会话里已经有一张待确认的卡，所以没建新的。
+        # 它的正文大概率还是「我整理了一条待办，请你确认」—— 用户会去找卡，
+        # 结果上面那张早就有了，只是没显示在这条消息底下。把正文改掉。
+        assistant.content = FALLBACK_SUPPRESSED
+        assistant.error_message = flow.rejection
     if not flow.ok:
         assistant.content = flow.reply.content or FALLBACK_FAILED
         assistant.error_message = flow.error_message
@@ -317,6 +330,7 @@ def _build_llm_messages(
     *,
     categories: dict[str, list[str]] | None = None,
     summary: str | None = None,
+    cards: dict[int, object] | None = None,
 ) -> list[dict]:
     """拼成 OpenAI 兼容的 messages 数组。
 
@@ -328,6 +342,9 @@ def _build_llm_messages(
     - assistant 行如果带 tool_calls，就**必须**跟着一条 role=tool 的回复，
       否则 DeepSeek 会直接拒请求。A5 目前不把 tool_calls 回灌（卡片本身就是对话的一部分，
       用户点确认后第 5 步会让前端追加一句正常的用户消息），所以这里同样跳过。
+    - :param cards: `{message_id: PendingAction}`，本会话这些消息产生的确认卡。
+      作用见下面 `_CARD_NOTE` —— 不给模型看见「这张卡已经发过了」，它会在下一轮
+      把同一件事再做一遍（真机会话 79：一张「买水果」卡还没确认，又出了一张）。
     """
     messages: list[dict] = [
         {
@@ -343,6 +360,7 @@ def _build_llm_messages(
         head = summary_mod.summary_message(summary)
         if head is not None:
             messages.append(head)
+    cards = cards or {}
     for row in history:
         if row.status != "ok" or row.role not in ("user", "assistant"):
             continue
@@ -351,8 +369,48 @@ def _build_llm_messages(
         text = (row.content or "").strip()
         if not text or text == _NO_REPLY:
             continue
+        if row.role == "assistant":
+            # 这条回复当时发过卡：补一句「已经发过」，否则模型看到自己说的
+            # 「我整理了一条待办」却找不到工具调用记录，会以为没发出去、再发一张。
+            text = _with_card_note(text, cards.get(row.id))
+        if _is_clarification(text):
+            # 反问不是事实。留在历史里，模型下一轮会把它当成「还没办完的事」接着追，
+            # 于是换了话题还提一句「水果的事明天再说」（真机会话 72 第 3 轮）。
+            # 补了一条替换说明：不留空位，否则模型会以为自己的提问没发出去。
+            text = _CLARIFIED
         messages.append({"role": row.role, "content": text})
     return messages
+
+
+_CARD_NOTE = "（这一轮你已经发过确认卡，用户还没确认）"
+
+
+def _with_card_note(text: str, card: object | None) -> str:
+    """给「发过卡」的助手消息补一句状态说明；已确认的只说明已处理。"""
+    if card is None:
+        return text
+    status = getattr(card, "status", None)
+    if status == "pending":
+        note = _CARD_NOTE
+    elif status in _CARD_STATUS_TEXT:
+        note = f"（这张确认卡已{_CARD_STATUS_TEXT[status]}）"
+    else:
+        return text
+    return f"{text} {note}"
+
+
+_CARD_STATUS_TEXT = {"confirmed": "确认", "cancelled": "取消", "expired": "过期"}
+
+
+# 模型的反问几乎都带问号、且长度可控；带工具调用的行早就被上面跳过了，
+# 所以这里不会误伤「我整理了一条待办」这种短回复（它没有问号）。
+_CLARIFIED = "（已向用户反问过一次，用户没有回答，此事暂不处理）"
+_CLARIFY_MAX_CHARS = 120
+
+
+def _is_clarification(text: str) -> bool:
+    """这段 assistant 正文是不是一次「缺信息反问」。"""
+    return "？" in text and len(text) <= _CLARIFY_MAX_CHARS
 
 
 _NO_REPLY = "(无回复)"

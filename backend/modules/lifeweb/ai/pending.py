@@ -409,6 +409,33 @@ def create_draft(
 # ---------- 读取 ----------
 
 
+def open_drafts(
+    db: Session, user_id: int, session_id: int, *, exclude_message_id: int | None = None
+) -> list[PendingAction]:
+    """这个会话里还挂着、没被处理的卡（status=pending 且没过期）。
+
+    用在出卡之前：**同一会话同时只允许有一张待确认的卡**。
+    真机会话 82 里模型在用户说了句不相干的闲聊之后，把已经发过的那张卡
+    原样又发了一次 —— 用户屏幕上会多出一张一模一样的卡，点哪张都行，
+    但两张都得处理，非常烦。光靠提示词治不住，得在这儿挡。
+
+    `exclude_message_id` 排除「本轮自己这条助手消息」，避免重试时把自己算进去。
+    """
+    stmt = (
+        select(PendingAction)
+        .where(
+            PendingAction.user_id == user_id,
+            PendingAction.session_id == session_id,
+            PendingAction.status == "pending",
+            PendingAction.expires_at > func.now(),
+        )
+        .order_by(PendingAction.id.asc())
+    )
+    if exclude_message_id is not None:
+        stmt = stmt.where(PendingAction.message_id != exclude_message_id)
+    return list(db.scalars(stmt).all())
+
+
 def _get_owned(db: Session, user_id: int, action_id: int) -> PendingAction:
     """按 id 取本人名下的动作；别人的 / 不存在的统一 404。
 
@@ -819,6 +846,7 @@ __all__ = [
     "get_pending",
     "mark_cancelled",
     "mark_confirmed",
+    "open_drafts",
     "prepare_payload",
     "resolve_category_id",
 ]
