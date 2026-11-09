@@ -16,11 +16,11 @@ cd backend
 3. **表结构以模型为准**：session 开始时 `drop_all` + `create_all`，不跑 Alembic。
    改了模型不用写迁移就能跑测试；但迁移本身仍要单独验证（`alembic check`）。
 
-## 覆盖范围（350 条）
+## 覆盖范围（365 条）
 
 | 文件 | 数量 | 覆盖 |
 |---|---|---|
-| `test_ai_tools.py` | 14 | 工具声明可 json 序列化且中文不转义、结构合 OpenAI 规范（type/description/required 与 properties 对得上/additionalProperties=False）、名字唯一、TOOL_NAMES 一致、create_task 只有 title 必填、参数名与 tasks 模块同名词、priority 枚举与库一致、模块常量不被调用方改动 |
+| `test_ai_tools.py` | 16 | 工具声明可 json 序列化且中文不转义、结构合 OpenAI 规范（type/description/required 与 properties 对得上/additionalProperties=False）、名字唯一、TOOL_NAMES 一致、create_task 只有 title 必填、参数名与 tasks 模块同名词、priority 枚举与库一致、模块常量不被调用方改动 |
 | `test_ai_parse.py` | 34 | 解析成功（全字段/只给标题补默认/strip/JSON 可序列化/frozen）、坏数据一律丢弃不抛（坏 JSON、代码块、数组、字符串、None、空标题、超长、缺 title、时间不带时区、年份 0206/2260、枚举外优先级、自加字段、未知工具名、非 dict call）、坏的不挡好的、多条只取第一、action_type 映射与 payload 字段与 tools 声明三方一致 |
 | `test_ai_pending.py` | 32 | 分类名换 id（系统分类/按 task 域隔离/未知或空回落 0/软删分类/未知动作类型）、可读时间（北京时间、Z 与 +00:00 归一、一周内补星期、无效字符串不抛）、preview 补字段且不改入参、create_draft 写 pending 行且 expires_at 落在 30 分钟内、只 flush 不 commit、重复建两张卡、确认前 tasks 表零写入、get_pending 越权或不存在 404、过期置 expired 并 410、已确认仍可读、状态机矩阵（重复确认不覆盖、已取消或已过期改不动、过期未置位也确认不了）、expires_at 为 naive UTC |
 | `test_ai_execute.py` | 27 | 确认真建待办（标题/分类/优先级/时区换算）、同事务（待办已提交且卡片 confirmed）、重复确认 409 且只建一条、已取消/已过期再确认 409/410、越权 404、`payload_override` 白名单（改标题/分类/时间生效，`user_id`/`status`/`completed_at` 被丢弃，非法值 422 且卡片保持 pending）、写业务表抛错整体回滚（卡片仍 pending、tasks 零行）、取消只置状态不建数据、确认与取消互斥 |
@@ -29,6 +29,7 @@ cd backend
 | `test_ai_tool_flow.py` | 12 | tools 真的传给 provider、纯聊天不重试也不落卡、合格调用落 pending 行且 tasks 零写入、只调工具时正文有兜底、未知分类落 0、坏参数重试一次后成功（重试请求形状与错误原文）、两次都坏→5xx 且不落卡、重试轮模型放弃调工具仍算失败、幻觉工具名不重试、草稿按会话隔离、失败轮不污染下一轮上下文、计数与消息行数一致 |
 | `test_ai_query.py` | 23 | 只读查询回灌真实清单（标题/状态/北京时间/优先级/id）、默认只查未完成且 doing 也算（done 需显式传 status）、关键词与分类过滤、未知分类返回空、due_before 按北京时间、limit 夹紧到 10、空结果明说、坏 JSON 与非法状态降级为无筛选、跨用户看不到别人的待办、软删不出现、只读链路 tasks 零写入且不落卡、最多 MAX_ROUNDS 轮、轮数用尽无正文时回退清单、多轮 token 累加、query→create_task 链（结果进下一轮上下文）、同轮 query+write 以写入为准 |
 | `test_ai_update.py` | 17 | 出卡带 before（原值/北京时间还原）且出卡时业务表零改动、编造或别人的/软删的 task_id 一律 404 且不落卡、确认只改一行不多出一条、没提的字段（时间/优先级/分类）原样保留、改时间按 +08:00→UTC 落库、没说分类沿用 before、说了新分类名按名重查、override 白名单外的 user_id/status/id 被丢弃、改出空标题 422 且卡片仍 pending、重复确认 409 不再改、过期 410、取消后确认 409、写业务表抛错整体回滚、正文为空时兜底说「我整理了一条修改」 |
+| `test_ai_expense.py` | 23 | 说出「38 块 支付宝」出卡：金额/时间/账户/分类都在 preview 且库里零写入；分类按 expense 域解析（「购物」落 3 而不是 task 域的 18）；分类名不认识落 0（未分类）照常出卡；收入类型与默认发生时间（出卡时刻）；金额 0 / 负数 / 三位小数 / 无时区时间一律不落卡；确认真写一笔且 source=ai、未分类 0 能落库、时间按 +08:00→UTC；重复确认 409、过期 410、取消后 409、别人的卡 404；override 可改金额与分类但改不了 source/user_id/id，非法值 422 且卡片仍 pending；写业务表抛错整卡回滚；模型不说话时兜底正文是「我整理了一笔账」（不是「待办」）|
 | `test_ai_chat.py` | 16 | 不带 session_id 自动建会话并取首句标题、追加到已有会话、system 提示词含时间与分类、历史按序回灌且过滤失败行、用量记实际 model、按配置算费用、空/超长消息 422、别人的/软删的/不存在的会话 404 且不落消息、超时 504 落失败行与失败用量、429/401/503 映射 |
 | `test_health.py` | 4 | healthz / readyz / 未注册路径与错方法的统一错误体 |
 | `test_tasks.py` | 36 | 列表分页与全部筛选、三种排序、新建、详情、PATCH 三态、状态幂等、软删除、用户隔离 |

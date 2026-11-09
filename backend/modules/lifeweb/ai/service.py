@@ -59,6 +59,10 @@ FALLBACK_REPLY = "我整理了一条待办，请你确认。"
 # 改待办时是**假话** —— 用户会以为多出来了一条，而不是某一条被改了。
 FALLBACK_REPLY_UPDATE = "我整理了一条修改，请你确认。"
 
+# 记账类草稿的兜底正文。同理不能套「待办」那句：用户说「打车花了 27 块」，
+# 卡片上写的却是「待办」，会让人以为 AI 记错了地方。
+FALLBACK_REPLY_EXPENSE = "我整理了一笔账，请你确认。"
+
 # 工具参数始终不合格时返回的正文与错误码
 MALFORMED_REASON = "模型给出的工具参数不合格，这一轮没有生成待确认卡片，请再试一次。"
 
@@ -208,7 +212,7 @@ def _fallback_for(tool_calls: list[dict[str, Any]]) -> str:
     """按工具名挑一句兜底正文。
 
     模型常常交了 tool_calls 却一个字不说。此时气泡总得有句话，
-    但话不能瞎说：产出「新建待办」草稿时和「改一条待办」时说的一句话不一样。
+    但话不能瞎说：产出「新建待办」草稿、改一条待办、记一笔账，说的是三句不同的话。
 
     tool_call 的形状有两种：DeepSeek 原始协议是扁平`{"id","name","arguments"}`），
     OpenAI 风格是嵌套的（`{"function": {"name": ...}}`）。两种都认，
@@ -221,6 +225,8 @@ def _fallback_for(tool_calls: list[dict[str, Any]]) -> str:
         name = function.get("name") or call.get("name")
         if name == "update_task":
             return FALLBACK_REPLY_UPDATE
+        if name == "create_expense":
+            return FALLBACK_REPLY_EXPENSE
     return FALLBACK_REPLY
 
 

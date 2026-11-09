@@ -40,6 +40,7 @@ from sqlalchemy.orm import Session  # noqa: E402
 import modules.registry  # noqa: E402,F401  导入即注册全部表
 from app import app  # noqa: E402
 from core.db import Base, engine  # noqa: E402
+from core.deps import get_current_user_id  # noqa: E402
 from modules.shared.categories.model import Category  # noqa: E402
 
 API = "/api/v1"
@@ -156,11 +157,20 @@ def _schema():
 
 @pytest.fixture(autouse=True)
 def _clean_db():
-    """每个用例前后都清空业务表，并重新插入 41 条系统分类。"""
+    """每个用例前后都清空业务表，并重新插入 41 条系统分类。
+
+    顺手把「当前用户」钉死成 1 号。V1.0 的 `get_current_user_id` 写死返回
+    `DEMO_USER_ID`；这里显式覆盖成同一个值，不是为了改变行为，而是为了让
+    「当前用户是谁」在各测试里**可预期**：越权用例可以把 user_id=2 的数据
+    造出来，再确认 1 号用户看不见，而不用依赖某个模块里写死的常量。
+    需要冒充别的用户时，在用例里再 `app.dependency_overrides[...] = lambda: 2`。
+    """
+    app.dependency_overrides[get_current_user_id] = lambda: 1
     _clear_tables()
     _seed_categories()
     yield
     _clear_tables()
+    app.dependency_overrides.pop(get_current_user_id, None)
 
 
 @pytest.fixture()

@@ -9,7 +9,8 @@
 
 工具分两类，这条界线比什么都重要：
 
-- **写入类**（`create_task` / `update_task`）：产出一张待确认卡片，用户点确认才落库。
+- **写入类**（`create_task` / `update_task` / `create_expense`）：产出一张待确认卡片，
+  用户点确认才落库。
 - **只读类**（`query_tasks`）：立刻执行、结果回灌给模型继续说话，不落库、无卡片。
 
 `update_task` 的存在顺带解释了为什么要先有 `query_tasks`：
@@ -182,8 +183,63 @@ UPDATE_TASK: dict = {
     },
 }
 
+CREATE_EXPENSE: dict = {
+    "type": "function",
+    "function": {
+        "name": "create_expense",
+        "description": (
+            "记录一笔支出或收入（记账）。"
+            "只在用户明确要求记一笔钱时调用，"
+            "例如「昨天中午吃饭花了 38」「刚发了工资 12000」，"
+            "或者用户对刚才的确认卡片说「对，记上吧」而上下文里已有金额时。"
+            "用户只是抱怨贵、询问花了多少、讨论预算时，一律不要调用。"
+            "金额用户没说出来时，不要调用，直接反问多少。"
+            "分类拿不准就用「其他」或省略；账户没提就用「现金」。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "amount": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "金额，正数。收入也填正数，方向由 type 表达。最多两位小数",
+                },
+                "type": {
+                    "type": "string",
+                    "enum": ["expense", "income"],
+                    "description": "expense=支出（默认），income=收入。用户说工资、收到、入账时用 income",
+                },
+                "category_name": {
+                    "type": "string",
+                    "description": (
+                        "分类名，只能从系统提示词里列出的支出分类中选，例如「餐饮」「交通」。"
+                        "说的是收入就从收入分类里选（如「工资」）。拿不准可以省略"
+                    ),
+                },
+                "account": {
+                    "type": "string",
+                    "description": "支付账户：现金 / 微信 / 支付宝 / 银行卡。用户没提就省略",
+                },
+                "occurred_at": {
+                    "type": "string",
+                    "description": (
+                        "发生时间，ISO 8601 带时区偏移，例如 2026-11-08T12:30:00+08:00。"
+                        "用户说「昨天中午」时要换算成具体时间；没说时间就省略"
+                    ),
+                },
+                "note": {
+                    "type": "string",
+                    "description": "备注，用户在句子里的额外信息（吃了什么、跟谁），≤ 50 字。不要编",
+                },
+            },
+            "required": ["amount"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 # 顺序固定：以后加工具就往后追加，测试与请求体都依赖这个顺序稳定
-ALL_TOOLS: list[dict] = [CREATE_TASK, QUERY_TASKS, UPDATE_TASK]
+ALL_TOOLS: list[dict] = [CREATE_TASK, QUERY_TASKS, UPDATE_TASK, CREATE_EXPENSE]
 
 # 只读工具名：tool_flow 据此分流 —— 这批立刻执行并回灌，不产生待确认卡片
 READ_ONLY_TOOLS: frozenset[str] = frozenset({"query_tasks"})

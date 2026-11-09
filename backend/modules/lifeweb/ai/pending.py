@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 
 from sqlalchemy import func, select, update
@@ -42,6 +43,7 @@ from core.errors import AppError, not_found
 from core.time import BEIJING, now_beijing, now_utc, to_beijing_iso, to_utc_naive
 from modules.lifeweb.ai.action_schema import (
     UPDATABLE_TASK_FIELDS,
+    CreateExpensePayload,
     CreateTaskPayload,
     ToolDraft,
     UpdateTaskPayload,
@@ -83,6 +85,9 @@ _WEEKDAY_WINDOW_DAYS = 7
 
 # priority 枚举值 → 中文。只做展示，取值校验已经在 CreateTaskPayload 做过
 PRIORITY_TEXT = {"low": "低", "medium": "中", "high": "高"}
+
+# 记一笔的方向 → 卡片上的中文（只用于显示，写库用的是英文 ENUM 值）
+EXPENSE_TYPE_TEXT = {"expense": "支出", "income": "收入"}
 
 
 # ---------- 分类名 → id ----------
@@ -173,7 +178,13 @@ def _lookup_category_id(db: Session, scope: str, category_name: str) -> int:
 
 # 动作类型 → categories.scope。现在两个动作都落在 task 域；
 # 加 create_expense 时这里加一行（`"create_expense": "expense"`），其余函数都不用改
-_SCOPE_BY_ACTION: dict[str, str] = {"create_task": "task", "update_task": "task"}
+_SCOPE_BY_ACTION: dict[str, str] = {
+    "create_task": "task",
+    "update_task": "task",
+    # 记一笔查的是 expense 域的分类：「购物」在 task 域是 18、在 expense 域是 3，
+    # 查错域不会报错，只会把这笔账悄悄记到别的分类名下 —— 错得最难发现。
+    "create_expense": "expense",
+}
 
 # 动作类型 → 能写进业务表的东西。现在只有一个字段：
 #   entity        写到哪个表的什么域（决定分类要按哪个 scope 再校验一次）
@@ -181,6 +192,7 @@ _SCOPE_BY_ACTION: dict[str, str] = {"create_task": "task", "update_task": "task"
 ACTION_SPECS: dict[str, dict[str, Any]] = {
     "create_task": {"entity": "task", "parse_payload": CreateTaskPayload},
     "update_task": {"entity": "task", "parse_payload": UpdateTaskPayload},
+    "create_expense": {"entity": "expense", "parse_payload": CreateExpensePayload},
 }
 
 
@@ -237,6 +249,9 @@ def build_preview(action_type: str, payload: dict) -> dict:
     if "category_id" not in preview:
         preview["category_id"] = UNCATEGORIZED_ID
 
+    if action_type == "create_expense":
+        preview.update(_expense_texts(payload))
+
     before = payload.get("before")
     if isinstance(before, dict):
         preview["before"] = {
@@ -270,6 +285,28 @@ def task_before(db: Session, user_id: int, task_id: Any) -> dict:
         "due_at": to_beijing_iso(task.due_at),
         "priority": task.priority,
         "category_id": task.category_id,
+    }
+
+
+def _expense_texts(payload: dict) -> dict:
+    """记一笔的卡片文本：金额、方向、发生时间。
+
+    金额要格式化成「¥38.50」而不是把 `Decimal("38.5")` 直接丢给前端：
+    JSON 里它会变成 38.5，卡片上就显示成「38.5 元」，两位小数的记账习惯断在那儿。
+    方向用中文（支出 / 收入）：卡片左下角那个数字，正负号比汉字更容易被忽略。
+
+    occurred_at 可能没传（用户没说时间，create_draft 用「草稿创建的那一刻」补上了），
+    所以这里一律能拿到值；万一为空就返回 None，前端跳过这一栏。
+    """
+    amount = payload.get("amount")
+    try:
+        amount_text = f"¥{Decimal(str(amount)):.2f}"
+    except (InvalidOperation, TypeError, ValueError):
+        amount_text = str(amount)
+    return {
+        "amount_text": amount_text,
+        "type_text": EXPENSE_TYPE_TEXT.get(payload.get("type"), "支出"),
+        "occurred_at_text": format_due_text(payload.get("occurred_at")),
     }
 
 
@@ -318,6 +355,16 @@ def create_draft(
         # 这时把 before 的 category_id 明确写回，别让它依赖字典合并的副作用。
         before_again = payload.get("before") or {}
         payload["category_id"] = before_again.get("category_id") or UNCATEGORIZED_ID
+
+    if draft.action_type == "create_expense":
+        if payload.get("occurred_at") is None:
+            # 用户只说「刚吃饭花了 38」时，发生时间就是这一刻 —— 在**出卡时**定死，
+            # 而不是等用户点确认时再取 now()：一张卡在屏幕上可能躺 20 分钟，
+            # 那时记成什么时间，取决于用户什么时候想起来点，这不合理。
+            #
+            # 注意 to_beijing_iso 的入参是 **naive UTC**（库里那种），
+            # 所以这里喂 now_utc()；喂 now_beijing() 会被当成 UTC 再加 8 小时。
+            payload["occurred_at"] = to_beijing_iso(now_utc())
 
     action = PendingAction(
         user_id=user_id,
@@ -528,7 +575,7 @@ def prepare_payload(
     try:
         validated = model(**raw)
     except Exception as exc:  # pydantic 的 ValidationError，但别让它走 500
-        raise AppError(CODE_BAD_PAYLOAD, f"待办内容不合法：{_short(exc)}", 422) from exc
+        raise AppError(CODE_BAD_PAYLOAD, f"待确认的内容不合法：{_short(exc)}", 422) from exc
 
     data = validated.model_dump(mode="json")
     data["category_id"] = _category_id_from(

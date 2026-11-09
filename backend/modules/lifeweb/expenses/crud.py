@@ -16,7 +16,7 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
 from core.time import beijing_day_start_utc, now_utc, to_utc_naive
-from modules.lifeweb.expenses.model import Expense
+from modules.lifeweb.expenses.model import EXPENSE_SOURCES, Expense
 from modules.lifeweb.expenses.schema import ExpenseCreate, ExpenseUpdate
 from modules.shared.money import money
 
@@ -103,17 +103,31 @@ def get_for_user(db: Session, user_id: int, expense_id: int) -> Expense | None:
     return db.scalars(_base_query(user_id).where(Expense.id == expense_id)).first()
 
 
-def create(db: Session, user_id: int, payload: ExpenseCreate) -> Expense:
+def create(
+    db: Session,
+    user_id: int,
+    payload: ExpenseCreate,
+    *,
+    source: str = "manual",
+    commit: bool = True,
+) -> Expense:
     """记一笔。
 
     四个要点：
       1. user_id 由调用方（router 从登录态）传进来，不读请求体
-      2. source 固定 manual —— 这条路径只承载「用户手记」，
-         V1.1 的 AI 记账走另一条路径写 'ai'，前端无权声明来源
+      2. source 由**哪条代码路径**决定，不由请求体声明：手工记账是 manual，
+         AI 聊天的确认卡片是 ai（A8）。前端传了也不认。
       3. occurred_at 入库前转成 naive UTC（库里只存 UTC）
       4. commit 之后的 refresh 不能省：id / created_at / updated_at
          都是数据库生成的，不 refresh 拿回来是 None，响应里会缺字段
+
+    `commit=False` 是给 AI 确认卡片用的（同 tasks/crud.create）：这笔账必须和
+    「卡片置 confirmed」在同一个事务里提交，否则会留下「账记上了、卡片还能再点」
+    的重复窗口。那种情况下也不 refresh —— 事务还没提交，拿不到数据库生成的值。
     """
+    if source not in EXPENSE_SOURCES:
+        raise ValueError(f"未知来源 {source!r}，只能是 {EXPENSE_SOURCES}")
+
     expense = Expense(
         user_id=user_id,
         type=payload.type,
@@ -123,9 +137,13 @@ def create(db: Session, user_id: int, payload: ExpenseCreate) -> Expense:
         occurred_at=to_utc_naive(payload.occurred_at),
         tags=payload.tags,
         note=payload.note,
-        source="manual",
+        source=source,
     )
     db.add(expense)
+    if not commit:
+        db.flush()  # 拿到自增 id 就够；提交由调用方统一做
+        return expense
+
     db.commit()
     db.refresh(expense)
     return expense

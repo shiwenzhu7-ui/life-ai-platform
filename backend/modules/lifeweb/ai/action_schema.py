@@ -38,10 +38,12 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from modules.lifeweb.expenses.schema import MAX_AMOUNT, ExpenseType
 from modules.lifeweb.tasks.schema import Priority, _clean_title
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,7 @@ def _one_line(exc: Exception) -> str:
 ACTION_TYPE_BY_TOOL: dict[str, str] = {
     "create_task": "create_task",
     "update_task": "update_task",
+    "create_expense": "create_expense",
 }
 
 # 一次回复里最多采纳几份草稿。
@@ -168,9 +171,79 @@ class UpdateTaskPayload(BaseModel):
 
 
 # 工具名 → 校验模型。加写入工具时在这里加一行，`parse_tool_calls` 不用改
+class CreateExpensePayload(BaseModel):
+    """create_expense 的草稿：记一笔的「记什么」。
+
+    与 `expenses.schema.ExpenseCreate` 的差别只有一处：**分类只收名字，不收 id**。
+    模型不知道 `category_id=3` 是什么，它只会说「餐饮」；把名字换成 id 是
+    `pending.create_draft` 的活（而且必须按 expense 域去查 —— 「购物」在
+    task 域和 expense 域是两个不同的 id）。
+
+    金额规则与手工记账**完全一致**（复用 ExpenseCreate 的 MAX_AMOUNT 与
+    decimal_places=2）：AI 记的账和手点的账，凭什么用两套标准。
+    三位小数直接拒绝而不是四舍五入 —— 悄悄改用户说的数，事后对账会对不上。
+
+    `occurred_at` 可以不传：用户只说「中午吃饭花了 38」时，用草稿生成那一刻的时间。
+    传了就必须带时区，理由同 due_at（naive 时间落库前只能猜时区）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    amount: Decimal = Field(
+        gt=Decimal("0"),
+        le=MAX_AMOUNT,
+        max_digits=12,
+        decimal_places=2,
+        description="金额，正数；收支方向由 type 表达",
+    )
+    type: ExpenseType = "expense"
+    category_name: str | None = Field(default=None, max_length=32)
+    account: str = Field(default="现金", max_length=32)
+    occurred_at: datetime | None = None
+    note: str | None = Field(default=None, max_length=255)
+
+    @field_validator("category_name")
+    @classmethod
+    def blank_category_means_none(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    @field_validator("note")
+    @classmethod
+    def blank_note_means_none(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    @field_validator("account")
+    @classmethod
+    def account_not_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("账户不能是空字符串")
+        return stripped
+
+    @field_validator("occurred_at")
+    @classmethod
+    def occurred_at_sane(cls, value: datetime | None) -> datetime | None:
+        """必须带时区、年份合理 —— 与待办的 due_at 同一套规则。"""
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("时间必须带时区，例如 2026-11-09T12:30:00+08:00")
+        if not _MIN_YEAR <= value.year <= _MAX_YEAR:
+            raise ValueError(f"年份不合理：{value.year}")
+        return value
+
+
+# 工具名 → 校验模型。加写入工具时在这里加一行，`parse_tool_calls` 不用改
 PAYLOAD_MODELS: dict[str, type[BaseModel]] = {
     "create_task": CreateTaskPayload,
     "update_task": UpdateTaskPayload,
+    "create_expense": CreateExpensePayload,
 }
 
 # 一次查询最多返回几条。与 tools.py 里 limit 的 maximum 是同一个数：
@@ -413,6 +486,7 @@ __all__ = [
     "DEFAULT_QUERY_LIMIT",
     "MAX_DRAFTS_PER_REPLY",
     "MAX_QUERY_LIMIT",
+    "CreateExpensePayload",
     "CreateTaskPayload",
     "QUERYABLE_STATUS",
     "QueryTasksPayload",

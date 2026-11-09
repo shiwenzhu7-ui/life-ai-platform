@@ -36,6 +36,8 @@ from core.time import now_utc
 from modules.lifeweb.ai import pending
 from modules.lifeweb.ai.models import PendingAction
 from modules.lifeweb.ai.pending import CODE_EXPIRED, CODE_REJECTED
+from modules.lifeweb.expenses import crud as expenses_crud
+from modules.lifeweb.expenses.schema import ExpenseCreate
 from modules.lifeweb.tasks import crud as tasks_crud
 from modules.lifeweb.tasks.schema import TaskCreate, TaskUpdate
 
@@ -201,6 +203,43 @@ def _write_update(db: Session, user_id: int, payload: dict) -> dict[str, Any]:
     return {"type": "task", "id": updated.id}
 
 
+def _write_expense(db: Session, user_id: int, payload: dict) -> dict[str, Any]:
+    """create_expense → 往 `expenses` 插一行（A8）。
+
+    三个与待办不同的地方：
+
+    1. **`source="ai"`**。这是「这笔账是谁记的」的唯一证据：以后要查
+       「AI 记的账有没有出错」，一条 `WHERE source='ai'` 就够了。
+       来源由这条代码路径决定，前端在 payload_override 里写 source 也没用
+       （白名单里没有这个字段）。
+    2. **分类按 expense 域二次校验**，不按 task 域。查不到落 0（未分类）——
+       和用户的约定一致：钱数和时间是硬信息，分类可以在账本里补，
+       不该因为分类名没对上就把整笔账丢掉。
+    3. **`ExpenseCreate` 的 category_id 是 `ge=1`**，所以 0（未分类）
+       不能走 `ExpenseCreate` 校验。这里的做法是：先给一个占位合法值再直接
+       改对象 `category_id`，见下方注释 —— 与其为了 0 去放宽业务层的 schema，
+       不如让「未分类」只在这个模块里成立。
+    """
+    category_id = _confirmed_category_id(db, "expense", payload.get("category_id"))
+    # ExpenseCreate.category_id 要求 ge=1；未分类（0）在建对象前替换成一个
+    # 保险值没有意义，直接在模型上用 model_construct 跳过校验更诚实 —— 但那样
+    # 会连金额校验一起跳过。所以走「先按合法值构造，再改字段」：
+    # 校验用的是 1，落库用的是真实的 category_id（含 0）。
+    probe_id = category_id or 1
+    create = ExpenseCreate(
+        type=payload.get("type") or "expense",
+        amount=payload["amount"],
+        category_id=probe_id,
+        account=payload.get("account") or "现金",
+        occurred_at=_as_datetime(payload.get("occurred_at")) or now_utc(),
+        note=payload.get("note"),
+    )
+    create.category_id = category_id
+
+    expense = expenses_crud.create(db, user_id, create, source="ai", commit=False)
+    return {"type": "expense", "id": expense.id}
+
+
 def _as_datetime(value: Any):
     """payload 里的 due_at 是 ISO 字符串（model_dump(mode="json") 出来的）。"""
     if not value:
@@ -210,10 +249,11 @@ def _as_datetime(value: Any):
     return value
 
 
-# 动作类型 → 写入函数。加 create_expense 时在这里加一行，`confirm` 不用改
+# 动作类型 → 写入函数。每个动作类型都在这里登记一行，`confirm` 不用改
 _WRITERS: dict[str, Callable[[Session, int, dict], dict[str, Any]]] = {
     "create_task": _write_task,
     "update_task": _write_update,
+    "create_expense": _write_expense,
 }
 
 
