@@ -20,6 +20,16 @@
    正常的 `content` 照样显示给用户。
 3. **字段名与 `tools.py` 的声明一一对应**：多一个字段直接拒绝（extra="forbid"），
    否则会存进一个谁也不认识的字段。
+
+A6 起多了一类**只读**调用（`query_tasks`）。它不走 `parse_tool_calls`：
+
+| | 写入（create_task） | 只读（query_tasks） |
+|---|---|---|
+| 入口 | `parse_tool_calls` → `ToolDraft` | `parse_read_call` → 参数字典 |
+| 参数坏掉 | 整条丢弃，让模型重来一次 | 降级成「无筛选」照常执行 |
+| 结果 | 落一张待确认卡片 | 回灌给模型，不落库 |
+
+只读之所以敢降级：查询没有必填项，查错了顶多是「多给几条」，不是「写错数据」。
 """
 
 from __future__ import annotations
@@ -35,6 +45,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from modules.lifeweb.tasks.schema import Priority, _clean_title
 
 logger = logging.getLogger(__name__)
+
+
+def _one_line(exc: Exception) -> str:
+    """pydantic 的 ValidationError 有几十行，回灌给模型只取第一行。"""
+    return str(exc).strip().splitlines()[0][:200] if str(exc).strip() else type(exc).__name__
 
 # 工具名 → 数据库 ai_pending_actions.action_type 的 ENUM 值。
 # 现在两个词恰好一样（create_task），但这层映射必须显式写出来：
@@ -92,8 +107,82 @@ class CreateTaskPayload(BaseModel):
         return value
 
 
-# 工具名 → 校验模型。加工具时在这里加一行，`parse_tool_calls` 不用改
+# 工具名 → 校验模型。加写入工具时在这里加一行，`parse_tool_calls` 不用改
 PAYLOAD_MODELS: dict[str, type[BaseModel]] = {"create_task": CreateTaskPayload}
+
+# 一次查询最多返回几条。与 tools.py 里 limit 的 maximum 是同一个数：
+# 那边是说明书（写给模型看），这边是闸门（模型不听也拦得住）。
+# 不改的话模型传 limit=1000 就能让一条回复的请求体涨到几万 token。
+MAX_QUERY_LIMIT = 10
+DEFAULT_QUERY_LIMIT = 5
+
+
+class QueryTasksPayload(BaseModel):
+    """query_tasks 的参数。五个都可选 —— 「我还有啥没做」一个词都没有也得能查。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    keyword: str | None = Field(default=None, max_length=50)
+    status: str | None = None
+    category_name: str | None = Field(default=None, max_length=32)
+    # 传成 datetime 而不是 str：时区校验与 create_task 的 due_at 完全同一套规则，
+    # 时区错、年份错都在这一步就挡掉，查询层只管比较（不重复实现一遍校验）
+    due_before: datetime | None = None
+    limit: int = DEFAULT_QUERY_LIMIT
+
+    @field_validator("keyword")
+    @classmethod
+    def keyword_blank_means_none(cls, value: str | None) -> str | None:
+        """模型常传 `""` 表示「不限」。空串要是当成关键词，
+        会变成 LIKE '%%' —— 能查出来，但日志里全是没含义的条件。"""
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    @field_validator("status")
+    @classmethod
+    def status_known(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value not in QUERYABLE_STATUS:
+            raise ValueError(f"status 只能是 {'/'.join(QUERYABLE_STATUS)}")
+        return value
+
+    @field_validator("due_before")
+    @classmethod
+    def due_before_sane(cls, value: datetime | None) -> datetime | None:
+        # 与 CreateTaskPayload.due_at 同一套规则：必须带时区、年份合理
+        return CreateTaskPayload.due_at_sane(value)
+
+    @field_validator("limit", mode="before")
+    @classmethod
+    def limit_clamp(cls, value: Any) -> int:
+        """三个方向都要收口，缺一个就有一种崩法：
+
+        - `"5"`：模型把数字写成字符串（真实发生过）→ 先转 int
+        - `0` / `-3`：除了 500 什么都不返回 → 抬到 1
+        - `1000`：请求体爆掉 → 压到 MAX_QUERY_LIMIT
+        - `"abc"`：垃圾值 → 落到默认，而不是让整条消息失败
+        """
+        if value is None:
+            return DEFAULT_QUERY_LIMIT
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            logger.warning("query_tasks 的 limit 不是整数（%r），按默认 %d 处理", value, DEFAULT_QUERY_LIMIT)
+            return DEFAULT_QUERY_LIMIT
+        # max(1, ...) 先行：负数也要变成 1，不能变成「LIMIT -3」
+        return min(max(1, number), MAX_QUERY_LIMIT)
+
+
+# 用户能筛选的状态。doing=进行中的也算「没做完的一堆里」，
+# 所以查询 todo 时自动带上它 —— 见 tool_flow._run_read_tool。
+QUERYABLE_STATUS: tuple[str, ...] = ("todo", "done")
+
+# 只读工具名 → 参数模型。与 PAYLOAD_MODELS 分开：这张表里的调用**不产生草稿**，
+# 立刻执行、结果回灌，所以不会走 ACTION_TYPE_BY_TOOL 的翻译。
+READ_PAYLOAD_MODELS: dict[str, type[BaseModel]] = {"query_tasks": QueryTasksPayload}
 
 
 @dataclass(frozen=True)
@@ -174,6 +263,9 @@ def parse_tool_calls(reply: Any) -> list[ToolDraft]:
     参数写成 `Any` 而不是 `LLMReply`：测试里可以传一个只有 `tool_calls`
     属性的假对象，不必为了造一个 LLMReply 去拼完整字段。真正用到的只有 `.tool_calls`。
 
+    **只解析写入类工具**。query_tasks 不在这里出现：它不发卡片、不落库，
+    走 `parse_read_call` 那条路。
+
     返回空列表表示「这次没有可用草稿」—— 调用方应当把模型的 content 当普通回复显示。
     """
     calls = getattr(reply, "tool_calls", None) or []
@@ -198,10 +290,71 @@ def parse_tool_calls(reply: Any) -> list[ToolDraft]:
     return drafts
 
 
+def _read_arguments(call: dict[str, Any]) -> tuple[list[str], dict[str, Any]] | None:
+    """把只读调用的 arguments 变成 {字段: 值}。
+
+    区别在于**查不出参数时返回空字典继续执行**，而不是像写入那样整条丢弃：
+    查询没有必填项，模型传了个坏 JSON 也完全能按「无筛选」查出前 5 条 ——
+    让用户看到一份列表，比让他看到「我没听懂」有用。errors 只用来写日志。
+    """
+    raw = call.get("arguments")
+    if raw is None or raw == "":
+        return [], {}
+    if not isinstance(raw, str):
+        logger.warning("只读工具 arguments 不是字符串，按无筛选处理 | %r", raw)
+        return ["arguments 不是字符串"], {}
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.warning(
+            "只读工具 arguments 不是合法 JSON，按无筛选处理 | err=%s | args=%r",
+            exc,
+            raw[:_ARGS_LOG_LIMIT],
+        )
+        return [f"arguments 不是合法 JSON：{exc}"], {}
+    if not isinstance(data, dict):
+        logger.warning("只读工具 arguments 不是对象，按无筛选处理 | type=%s", type(data).__name__)
+        return ["arguments 不是对象"], {}
+    return [], data
+
+
+def parse_read_call(call: Any) -> tuple[str, dict[str, Any], list[str]] | None:
+    """解析单个只读调用，返回 `(tool_name, 参数, 出错原因列表)`。
+
+    不是只读工具、或叫不出名字时返回 None（交给写入那条路处理）。
+    参数校验失败**不返回 None**，而是带着出错原因和空参数返回：
+    调用方据此执行一次「无筛选查询」，并把原因写进回灌给模型的内容里，
+    模型下一轮就知道自己哪个参数写错了。
+    """
+    if not isinstance(call, dict):
+        return None
+    tool_name = call.get("name")
+    if not isinstance(tool_name, str) or tool_name not in READ_PAYLOAD_MODELS:
+        return None
+
+    errors, data = _read_arguments(call)
+    model = READ_PAYLOAD_MODELS[tool_name]
+    try:
+        validated = model(**data)
+    except Exception as exc:  # ValidationError 之外也可能有别的
+        logger.warning(
+            "只读工具参数校验失败，降级为无筛选 | tool=%s | err=%s", tool_name, _one_line(exc)
+        )
+        return tool_name, model().model_dump(mode="json"), [*errors, _one_line(exc)]
+
+    return tool_name, validated.model_dump(mode="json"), errors
+
+
 __all__ = [
     "ACTION_TYPE_BY_TOOL",
+    "DEFAULT_QUERY_LIMIT",
     "MAX_DRAFTS_PER_REPLY",
+    "MAX_QUERY_LIMIT",
     "CreateTaskPayload",
+    "QUERYABLE_STATUS",
+    "QueryTasksPayload",
+    "READ_PAYLOAD_MODELS",
     "ToolDraft",
+    "parse_read_call",
     "parse_tool_calls",
 ]

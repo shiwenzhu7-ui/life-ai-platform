@@ -13,7 +13,13 @@ from copy import deepcopy
 
 import pytest
 
-from modules.lifeweb.ai.tools import ALL_TOOLS, CREATE_TASK, TOOL_NAMES
+from modules.lifeweb.ai.tools import (
+    ALL_TOOLS,
+    CREATE_TASK,
+    QUERY_TASKS,
+    READ_ONLY_TOOLS,
+    TOOL_NAMES,
+)
 
 
 def test_all_tools_is_json_serializable():
@@ -36,7 +42,10 @@ def test_every_tool_is_well_formed():
 
         parameters = function["parameters"]
         assert parameters["type"] == "object"
-        assert parameters["required"], f"{function['name']} 至少要有一个必填参数"
+        # 写入类至少要有一个必填参数（没标题就建不出东西）；
+        # 只读查询可以零必填 —— 「我还有啥没做」本来就没有关键词可填
+        if function["name"] not in READ_ONLY_TOOLS:
+            assert parameters["required"], f"{function['name']} 至少要有一个必填参数"
         # 必填项必须真的在 properties 里，否则模型填不出来
         for name in parameters["required"]:
             assert name in parameters["properties"], f"{name} 不在 properties 里"
@@ -95,3 +104,40 @@ def test_each_tool_name_is_a_plain_identifier(name):
     """工具名会出现在日志、确认记录、前端预览里，必须是纯标识符。"""
     assert name.isidentifier()
     assert name.islower()
+
+
+# ---------- A6：只读工具 ----------
+
+
+def test_query_tasks_requires_no_argument():
+    """查询必须能零参数调用 —— 用户说「我还有啥没做」时没有关键词可填。"""
+    parameters = QUERY_TASKS["function"]["parameters"]
+    assert parameters["required"] == []
+    assert set(parameters["properties"]) == {
+        "keyword",
+        "status",
+        "category_name",
+        "due_before",
+        "limit",
+    }
+
+
+def test_query_tasks_limit_is_capped():
+    """结果会回灌进下一轮请求体，上限必须卡死在 10。"""
+    limit = QUERY_TASKS["function"]["parameters"]["properties"]["limit"]
+    assert limit["maximum"] == 10
+    assert limit["minimum"] == 1
+
+
+def test_read_only_tools_is_a_strict_subset():
+    """只读名单只能从真实工具里挑，且必须包含 query_tasks。"""
+    assert READ_ONLY_TOOLS < TOOL_NAMES
+    assert "query_tasks" in READ_ONLY_TOOLS
+    assert "create_task" not in READ_ONLY_TOOLS
+
+
+def test_query_tasks_description_forbids_lying_about_writes():
+    """说明书里得明说「不要说已经帮你改好」，否则模型查完就邀功。"""
+    description = QUERY_TASKS["function"]["description"]
+    assert "只读" in description
+    assert "create_task" in description

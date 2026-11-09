@@ -12,7 +12,8 @@
 再点一次确认又是一条重复待办。这时提交权上提到调用方（ai/execute.py）。
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from typing import Sequence
 
 from sqlalchemy import Select, case, func, or_, select
 from sqlalchemy.orm import Session
@@ -20,6 +21,11 @@ from sqlalchemy.orm import Session
 from core.time import beijing_day_start_utc, now_utc, to_utc_naive
 from modules.lifeweb.tasks.model import Task
 from modules.lifeweb.tasks.schema import TaskCreate, TaskUpdate
+
+# search() 的硬上限：AI 查询一次最多这么多条。
+# 结果要原样回灌进下一轮请求体，放开到几百条就是几千 token 的账单，
+# 而且模型反而更容易挑错行。
+MAX_SEARCH_LIMIT = 10
 
 
 def _base_query(user_id: int) -> Select:
@@ -116,8 +122,7 @@ def list_for_user(
     if keyword and keyword.strip():
         # 用户输入永远不能直接拼进 LIKE：% 和 _ 是通配符。
         # 顺序不能反 —— 必须先把 \ 换成 \\，否则后面加进去的转义符会被再转义一次。
-        raw = keyword.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        like = f"%{raw}%"
+        like = _like_parts(keyword)
         # 关键字匹配标题或备注（docs/接口设计.md §1.3）
         conds.append(
             or_(
@@ -159,6 +164,66 @@ def get_for_user(db: Session, user_id: int, task_id: int) -> Task | None:
     403 等于告诉对方「这条存在，只是你没权限」，可以被用来探测别人的数据量。
     """
     return db.scalar(_base_query(user_id).where(Task.id == task_id))
+
+
+def _like_parts(keyword: str) -> str:
+    """把用户输入包成 LIKE 模式。
+
+    用户输入永远不能直接拼进 LIKE：% 和 _ 是通配符，一个「100%」能把整张表捞出来。
+    顺序不能反 —— 必须先把 \\ 换成 \\\\，否则后面加进去的转义符会被再转义一次。
+    """
+    raw = keyword.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{raw}%"
+
+
+def search(
+    db: Session,
+    user_id: int,
+    *,
+    keyword: str | None = None,
+    statuses: Sequence[str] | None = None,
+    category_id: int | None = None,
+    due_before: datetime | None = None,
+    limit: int = 5,
+) -> list[Task]:
+    """给 AI 查询工具用的精简查询：限本人 + 未删除，按「快到期的在前」取前 N 条。
+
+    与 `list_for_user` 的区别（**不是重复实现**）：
+      - 没有分页、不数 total：模型只要一份清单，不需要「共 37 条」
+      - `statuses` 是列表：查询 todo 时要同时带上 doing（进行中的也还没做完）
+      - `due_before` 收 datetime（A6 的调用方已带时区），这里转 naive UTC 再比较
+      - 排序固定：先按 due_at 升序、空值最后、id 倒序兜底
+        —— 模型拿到的顺序就是它该照着说的顺序，不该由用户翻页决定
+
+    `limit` 在这里再夹一次（1..MAX_SEARCH_LIMIT）：上层已经夹过，
+    但这是最后一道，写死一个数比信任调用方便宜。
+    """
+    conds: list = []
+
+    if statuses:
+        conds.append(Task.status.in_(list(statuses)))
+
+    if category_id is not None:
+        conds.append(Task.category_id == category_id)
+
+    if keyword and keyword.strip():
+        # 只搜标题：AI 查询是为了「认出是哪一条」，备注太长、
+        # 而且按备注命中反而会让清单里出现标题毫不相关的条目
+        conds.append(Task.title.like(_like_parts(keyword), escape="\\"))
+
+    if due_before is not None:
+        conds.append(Task.due_at.is_not(None))
+        conds.append(Task.due_at < to_utc_naive(due_before))
+
+    base = _base_query(user_id)
+    if conds:
+        base = base.where(*conds)
+
+    size = min(max(1, int(limit)), MAX_SEARCH_LIMIT)
+    stmt = base.order_by(
+        Task.due_at.is_(None), Task.due_at.asc(), Task.id.desc()
+    ).limit(size)
+    return list(db.scalars(stmt).all())
 
 
 def create(

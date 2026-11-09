@@ -59,6 +59,34 @@ class LLMReply:
     raw: dict = field(default_factory=dict)
 
 
+def merge_replies(replies: Sequence["LLMReply"]) -> "LLMReply":
+    """把一次问答里多轮调用的回复合并成一条（A6：tool_flow 可能调 2–3 次）。
+
+    只有一件事必须做对：**token 和延迟要累加**。
+
+    如果只留最后一轮，用量日志会严重少记 —— 第 1 轮模型为了决定「调不调工具」
+    往往产出上百个 token，那不是免费的前戏。少记的后果是月底算账时
+    「账单是估算的三倍」，而且永远查不出为什么。
+
+    content / tool_calls / model / raw 取**最后一轮**：那才是给用户看的答案。
+    空列表直接抛 ValueError —— 调用方保证至少有一次回复，真出现了就是 bug，
+    静默合成一个空回复会让失败伪装成「模型没说话」。
+    """
+    if not replies:
+        raise ValueError("merge_replies 需要至少一条回复")
+
+    last = replies[-1]
+    return LLMReply(
+        content=last.content,
+        tool_calls=list(last.tool_calls or []),
+        token_in=sum(r.token_in for r in replies),
+        token_out=sum(r.token_out for r in replies),
+        latency_ms=sum(r.latency_ms for r in replies),
+        model=last.model,
+        raw=last.raw,
+    )
+
+
 class LLMError(Exception):
     """模型调用失败。
 
@@ -297,4 +325,5 @@ __all__ = [
     "DeepSeekProvider",
     "FakeProvider",
     "build_provider",
+    "merge_replies",
 ]
