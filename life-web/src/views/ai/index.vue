@@ -33,7 +33,7 @@
     <section class="ai__main">
       <template v-if="activeId">
         <header class="ai__header">
-          <span class="ai__title">{{ activeSession ? activeSession.title : '' }}</span>
+          <span class="ai__title">{{ currentSession ? currentSession.title : '' }}</span>
         </header>
 
         <div ref="messagesEl" v-loading="loadingMessages" class="ai__messages">
@@ -123,6 +123,7 @@ import {
   chat,
   confirmAction,
   createSession,
+  getSession,
   listMessages,
   listSessions
 } from '@/api/ai'
@@ -135,6 +136,9 @@ export default {
     return {
       sessions: [],
       activeId: null,
+      // 当前会话的「权威那一份」：列表里的对象可能是旧的（别处改过名），
+      // 也可能压根不在列表里（翻页/以后加搜索时）。见 refreshActiveSession。
+      activeSession: null,
       messages: [],
       input: '',
       loadingSessions: false,
@@ -145,8 +149,9 @@ export default {
     }
   },
   computed: {
-    activeSession() {
-      return this.sessions.find((item) => item.id === this.activeId) || null
+    // 标题优先用详情接口回来那份；还没回来时先用列表里的，避免闪一下空白
+    currentSession() {
+      return this.activeSession || this.sessions.find((item) => item.id === this.activeId) || null
     }
   },
   created() {
@@ -195,8 +200,28 @@ export default {
       try {
         const page = await listSessions({ page: 1, size: 50 }, { silent: true })
         this.sessions = page.items || []
+        // 列表刷新完顺手把详情也对一遍：标题可能刚被别处改过
+        this.refreshActiveSession()
       } catch (e) {
         // 侧栏刷新失败不该盖住主流程的错误提示，静默即可
+      }
+    },
+
+    // 单独取当前会话的详情。三件事都靠它：
+    // 1. 会话在别处改了名，列表那份是旧的；
+    // 2. 列表翻不到这一条（分页 / 以后的搜索筛选）时，标题不能空着；
+    // 3. 发完消息后 message_count 变了，详情要跟上。
+    // 失败就静默回落到列表那份，标题差一点不该打断对话。
+    async refreshActiveSession(sessionId) {
+      const id = sessionId || this.activeId
+      if (!id) return
+      try {
+        const session = await getSession(id, { silent: true })
+        // 请求回来时用户可能已经切走了，别把别人的数据画到当前标题上
+        if (this.activeId !== id) return
+        this.activeSession = session
+      } catch (e) {
+        // 会话被删了：标题留空，loadMessages 会给出 404 的提示
       }
     },
 
@@ -205,9 +230,11 @@ export default {
       // 发送中切走会让「正在思考」的结果落到别的会话里，先挡住
       if (this.sending) return
       this.activeId = sessionId
+      this.activeSession = null
       this.messages = []
       this.errorText = ''
       this.loadMessages(sessionId)
+      this.refreshActiveSession(sessionId)
       this.focusComposer()
     },
 
@@ -219,6 +246,7 @@ export default {
         const session = await createSession({})
         this.sessions.unshift(session)
         this.activeId = session.id
+        this.activeSession = session
         this.messages = []
         this.errorText = ''
         this.focusComposer()

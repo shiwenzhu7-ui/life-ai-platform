@@ -16,7 +16,7 @@ cd backend
 3. **表结构以模型为准**：session 开始时 `drop_all` + `create_all`，不跑 Alembic。
    改了模型不用写迁移就能跑测试；但迁移本身仍要单独验证（`alembic check`）。
 
-## 覆盖范围（468 条）
+## 覆盖范围（512 条）
 
 | 文件 | 数量 | 覆盖 |
 |---|---|---|
@@ -26,7 +26,7 @@ cd backend
 | `test_ai_pending.py` | 32 | 分类名换 id（系统分类/按 task 域隔离/未知或空回落 0/软删分类/未知动作类型）、可读时间（北京时间、Z 与 +00:00 归一、一周内补星期、无效字符串不抛）、preview 补字段且不改入参、create_draft 写 pending 行且 expires_at 落在 30 分钟内、只 flush 不 commit、重复建两张卡、确认前 tasks 表零写入、get_pending 越权或不存在 404、过期置 expired 并 410、已确认仍可读、状态机矩阵（重复确认不覆盖、已取消或已过期改不动、过期未置位也确认不了）、expires_at 为 naive UTC |
 | `test_ai_execute.py` | 27 | 确认真建待办（标题/分类/优先级/时区换算）、同事务（待办已提交且卡片 confirmed）、重复确认 409 且只建一条、已取消/已过期再确认 409/410、越权 404、`payload_override` 白名单（改标题/分类/时间生效，`user_id`/`status`/`completed_at` 被丢弃，非法值 422 且卡片保持 pending）、写业务表抛错整体回滚（卡片仍 pending、tasks 零行）、取消只置状态不建数据、确认与取消互斥 |
 | `test_ai_provider.py` | 16 | 假 provider 排队与入参记录、请求形状与 Bearer 头、工具透传、响应解析（含只调工具）、401 不泄露 key、429 重试一次、5xx 不无限重试、超时/连不上/坏 JSON、工厂无 key 报错 |
-| `test_ai_sessions.py` | 26 | 新建默认标题/自定义/空白拒绝/忽略请求体 user_id、列表排序（空会话置后）与分页、软删过滤、跨用户 404、同 session_id 下消息按 user_id 隔离、消息顺序与分页、改标题三态、软删后行仍在、连删 404、消息带出确认卡片（preview 与 +08:00 时间、无卡为 null、已确认/过期卡照实返回且读列表不改状态、别人的卡不外泄、confirmed 卡带出 created_id 且坏 result 降级为 null、确认响应同时有 created.id 与 created_id） |
+| `test_ai_sessions.py` | 30 | 新建默认标题/自定义/空白拒绝/忽略请求体 user_id、列表排序（空会话置后）与分页、软删过滤、跨用户 404、同 session_id 下消息按 user_id 隔离、消息顺序与分页、改标题三态、软删后行仍在、连删 404、会话详情与列表同形/空会话/不存在与软删与他人 404/改名后立刻生效、消息带出确认卡片（preview 与 +08:00 时间、无卡为 null、已确认/过期卡照实返回且读列表不改状态、别人的卡不外泄、confirmed 卡带出 created_id 且坏 result 降级为 null、确认响应同时有 created.id 与 created_id） |
 | `test_ai_tool_flow.py` | 12 | tools 真的传给 provider、纯聊天不重试也不落卡、合格调用落 pending 行且 tasks 零写入、只调工具时正文有兜底、未知分类落 0、坏参数重试一次后成功（重试请求形状与错误原文）、两次都坏→5xx 且不落卡、重试轮模型放弃调工具仍算失败、幻觉工具名不重试、草稿按会话隔离、失败轮不污染下一轮上下文、计数与消息行数一致 |
 | `test_ai_query.py` | 23 | 只读查询回灌真实清单（标题/状态/北京时间/优先级/id）、默认只查未完成且 doing 也算（done 需显式传 status）、关键词与分类过滤、未知分类返回空、due_before 按北京时间、limit 夹紧到 10、空结果明说、坏 JSON 与非法状态降级为无筛选、跨用户看不到别人的待办、软删不出现、只读链路 tasks 零写入且不落卡、最多 MAX_ROUNDS 轮、轮数用尽无正文时回退清单、多轮 token 累加、query→create_task 链（结果进下一轮上下文）、同轮 query+write 以写入为准 |
 | `test_ai_query_expenses.py` | 18 | 查账口径：合计按**全部命中记录**算而不受明细 limit 影响、收入支出分开合计、时间按北京时间整天切（边界那一笔不多不少）、起止反了自动换、datetime 字符串按日期处理、分类按 expense 域解析（「购物」=3 不是 18）、未知分类返回空、账户过滤、别人的与软删的不进合计、空结果明说、limit 夹到 10、坏参数降级为无筛选、查账零写入零卡片、模型不说话时兜底正文带合计、工具声明与只读名单一致、`_parse_date` 各种形状 |

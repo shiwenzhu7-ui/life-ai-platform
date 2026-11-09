@@ -150,6 +150,58 @@ def test_list_sessions_excludes_soft_deleted(client, db):
     assert body["total"] == 1
 
 
+# ---------- 详情（A13） ----------
+
+
+def test_get_session_returns_the_same_shape_as_list(client, db):
+    """详情与列表同一条序列化路径：前端拿到两份不会对不上。"""
+    session = _make_session(db, title="买水果", last_message_at=now_utc())
+    session.message_count = 1
+    db.commit()
+    _make_message(db, session.id, role="assistant", content="我整理了一条待办，请你确认。")
+
+    detail = client.get(f"{API}/ai/sessions/{session.id}")
+    listed = client.get(f"{API}/ai/sessions").json()["items"][0]
+
+    assert detail.status_code == 200
+    assert detail.json() == listed
+    assert detail.json()["title"] == "买水果"
+    assert detail.json()["message_count"] == 1
+
+
+def test_get_session_of_empty_session(client, db):
+    session = _make_session(db)
+
+    body = client.get(f"{API}/ai/sessions/{session.id}").json()
+
+    assert body["id"] == session.id
+    assert body["message_count"] == 0
+    assert body["last_message_at"] is None
+
+
+def test_get_session_missing_or_deleted_or_not_mine_is_404(client, db):
+    """三种「不能看」走同一个 404：不泄露这个 id 到底存不存在。"""
+    alive = _make_session(db)
+    gone = _make_session(db, deleted_at=now_utc())
+    others = _make_session(db, user_id=2, title="别人的会话")
+
+    assert client.get(f"{API}/ai/sessions/999999").status_code == 404
+    assert client.get(f"{API}/ai/sessions/{gone.id}").status_code == 404
+    assert client.get(f"{API}/ai/sessions/{others.id}").status_code == 404
+
+    with _acting_as(2):
+        assert client.get(f"{API}/ai/sessions/{others.id}").status_code == 200
+        assert client.get(f"{API}/ai/sessions/{alive.id}").status_code == 404
+
+
+def test_get_session_follows_rename(client, db):
+    """列表那份可能是旧的，详情必须是现在库里的样子。"""
+    session = _make_session(db, title="旧标题")
+    client.patch(f"{API}/ai/sessions/{session.id}", json={"title": "新标题"})
+
+    assert client.get(f"{API}/ai/sessions/{session.id}").json()["title"] == "新标题"
+
+
 # ---------- 用户隔离 ----------
 
 

@@ -99,6 +99,23 @@ def list_sessions(
     return Page.create([SessionOut.from_model(row) for row in rows], total, page, size)
 
 
+@session_router.get("/{session_id}", response_model=SessionOut, summary="会话详情")
+def get_session(
+    session_id: int,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+) -> SessionOut:
+    """按 id 取一个会话（A13）。
+
+    前端打开 `/ai?session=5` 时要能直接拿到标题，而不是「在列表里翻一遍」——
+    列表有分页、以后还会有搜索筛选，翻不到就永远显示不出标题；
+    会话在别处改了名，列表那份也还是旧的。
+
+    与 `PATCH` / `DELETE` 同一条判定：不存在 / 已软删 / 不是我的，一律 404。
+    """
+    return SessionOut.from_model(_get_or_404(db, user_id, session_id))
+
+
 @session_router.get(
     "/{session_id}/messages", response_model=Page[MessageOut], summary="会话消息"
 )

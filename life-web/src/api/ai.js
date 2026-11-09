@@ -1,6 +1,6 @@
 import request, { compactParams } from '@/utils/request'
 
-// AI 助手 5 个接口，一一对应后端 modules/lifeweb/ai/router.py。
+// AI 助手 6 个接口，一一对应后端 modules/lifeweb/ai/router.py。
 // 页面只调这里的函数，不拼 url。
 //
 // 第二个参数是 axios 配置（{ silent: true } 关掉自动报错提示），
@@ -16,6 +16,13 @@ export function listSessions(params, options) {
 // 请求体可省略（后端补默认标题「新对话」）；传 { title } 则用指定标题
 export function createSession(payload, options) {
   return request.post('/ai/sessions', payload || {}, options)
+}
+
+// GET /ai/sessions/{id} → 单条会话（字段与列表每一项完全一致）
+// 打开 /ai?session=5 时用它拿标题：不能指望「列表里恰好有这一条」——
+// 列表有分页，以后还会有搜索筛选，翻不到就永远显示不出标题。
+export function getSession(sessionId, options) {
+  return request.get(`/ai/sessions/${sessionId}`, options)
 }
 
 // GET /ai/sessions/{id}/messages?order=desc → { items, total, page, size, pages }
