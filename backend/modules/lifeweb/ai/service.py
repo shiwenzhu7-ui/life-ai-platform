@@ -148,7 +148,12 @@ def chat(
     # 失败（flow.ok=False：模型两次都交了不合格的工具参数）时这条消息仍是用户
     # 这一轮唯一的记录，所以照样落库、标 failed，并把模型的原文和失败原因一起存下 ——
     # 用户刷新后能看到「它说了一句什么、为什么没成」，而不是一条凭空消失的提问。
-    _apply_reply(assistant, flow.reply, failed=not flow.ok)
+    _apply_reply(
+        assistant,
+        flow.reply,
+        failed=not flow.ok,
+        draft_action_type=flow.pending.action_type if flow.pending is not None else None,
+    )
     if not flow.ok:
         assistant.content = flow.reply.content or FALLBACK_FAILED
         assistant.error_message = flow.error_message
@@ -187,16 +192,28 @@ def chat(
 # ---------- 内部 ----------
 
 
-def _apply_reply(msg: ChatMessage, reply: LLMReply, *, failed: bool) -> None:
+def _apply_reply(
+    msg: ChatMessage,
+    reply: LLMReply,
+    *,
+    failed: bool,
+    draft_action_type: str | None = None,
+) -> None:
     """把模型的东西写到助手消息上（正文为空时的处理在这里收口）。
 
     - 有正文：原样用
     - 没正文但有草稿：用 FALLBACK_REPLY，让气泡里能看见一句话
     - 没正文也没草稿（模型回了空串）：`(无回复)`，前端据此不渲染空气泡
+
+    「有草稿」不能只看 `reply.tool_calls`：`tool_flow` 产出的最终 reply 里只剩**正文**
+    （草稿已经落库了），tool_calls 往往在上一轮的 reply 上。只看 tool_calls 会把
+    记账的兜底句退化成「我整理了一条待办」（线上真出现过）。所以优先看落库的草稿类型。
     """
     content = (reply.content or "").strip()
     if content:
         msg.content = content
+    elif draft_action_type:
+        msg.content = _fallback_for_tool(_TOOL_BY_ACTION.get(draft_action_type))
     elif reply.tool_calls:
         msg.content = _fallback_for(reply.tool_calls)
     else:
@@ -223,11 +240,28 @@ def _fallback_for(tool_calls: list[dict[str, Any]]) -> str:
             continue
         function = call.get("function") if isinstance(call.get("function"), dict) else {}
         name = function.get("name") or call.get("name")
-        if name == "update_task":
-            return FALLBACK_REPLY_UPDATE
-        if name == "create_expense":
-            return FALLBACK_REPLY_EXPENSE
+        if name in _FALLBACK_BY_TOOL:
+            return _FALLBACK_BY_TOOL[name]
     return FALLBACK_REPLY
+
+
+def _fallback_for_tool(tool_name: str | None) -> str:
+    """按工具名取兜底句；不认识（含 None）就用「新建待办」那句。"""
+    if tool_name and tool_name in _FALLBACK_BY_TOOL:
+        return _FALLBACK_BY_TOOL[tool_name]
+    return FALLBACK_REPLY
+
+
+# 工具名 → 兜底句。update/create_task 之外的写入类工具都在这里登记一句自己的话，
+# 漏登记的会退回「我整理了一条待办」——那是假话，所以新增写入工具时必须补这一行。
+_FALLBACK_BY_TOOL: dict[str, str] = {
+    "update_task": FALLBACK_REPLY_UPDATE,
+    "create_expense": FALLBACK_REPLY_EXPENSE,
+}
+
+# 草稿的 action_type 与工具名现在同名，但这是两套命名空间：
+# 以后某个工具可能产出两种动作（例如 create_shopping_list → 既有清单又有条目）。
+_TOOL_BY_ACTION: dict[str, str] = {"update_task": "update_task", "create_expense": "create_expense"}
 
 
 def _resolve_session(

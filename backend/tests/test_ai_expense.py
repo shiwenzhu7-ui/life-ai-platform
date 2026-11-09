@@ -159,8 +159,11 @@ def test_chat_produces_expense_card(client, provider):
 def test_chat_fallback_line_says_expense_not_task(client, provider):
     """模型只说工具、不说话时，兜底那句必须是「一笔账」。
 
-    回归用例：A8 之前这里硬编码「我整理了一条待办」，用户说「打车花了 27 块」，
-    卡片上却是待办，看起来像 AI 记错了地方。
+    回归用例：这里踩过两次坑。
+    1. A8 之前硬编码「我整理了一条待办」，用户说「打车花了 27 块」，卡片上却是待办；
+    2. 只按 `reply.tool_calls` 判断也没用 —— tool_flow 交回来的最终 reply 只剩正文，
+       tool_calls 在上一轮，兜底照样退化成「待办」。所以断言走的是 HTTP 响应
+       （也就是真正落库的那句话），而不是某个内部函数的返回值。
     """
     provider.queue(_reply(calls=[_call(amount=27.5, category_name="交通")]))
 
@@ -168,6 +171,21 @@ def test_chat_fallback_line_says_expense_not_task(client, provider):
 
     assert res.status_code == 200, res.text
     assert res.json()["reply"] == "我整理了一笔账，请你确认。"
+    assert res.json()["pending_action"]["action_type"] == "create_expense"
+
+
+def test_stored_message_also_says_expense(client, provider):
+    """刷新页面走的是消息列表，那句话也必须是「一笔账」（气泡正文来自库里）。"""
+    provider.queue(_reply(calls=[_call(amount=7, category_name="餐饮")]))
+
+    chat = _chat(client).json()
+
+    listing = client.get(
+        f"{API}/ai/sessions/{chat['session_id']}/messages", params={"page": 1, "size": 50}
+    ).json()
+    assistant = [m for m in listing["items"] if m["role"] == "assistant"][-1]
+    assert assistant["content"] == "我整理了一笔账，请你确认。"
+    assert assistant["pending_action"]["action_type"] == "create_expense"
 
 
 def test_chat_card_does_not_write_anything(client, provider):
