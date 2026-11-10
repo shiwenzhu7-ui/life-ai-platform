@@ -4,13 +4,10 @@
 本文件全程走真实依赖（清掉 conftest 的 user=1 覆盖），不 mock 任何东西。
 """
 
-from datetime import UTC, datetime, timedelta
-
 import pytest
 
 from conftest import API, new_session
 from core.security import hash_password
-from modules.lifeweb.ai.models import UsageLog
 from modules.shared.users.model import User
 
 PWD = "12345678"
@@ -194,7 +191,7 @@ def test_token_works_on_business_api(open_client):
 # ---------- /auth/me ----------
 
 
-def test_me_returns_quota_and_usage(open_client):
+def test_me_returns_current_user(open_client):
     _register(open_client)
     token = _token(open_client)
     r = open_client.get(f"{API}/auth/me", headers={"Authorization": f"Bearer {token}"})
@@ -203,36 +200,23 @@ def test_me_returns_quota_and_usage(open_client):
     body = r.json()
     assert body["username"] == "alice"
     assert body["role"] == "user"
-    assert body["daily_ai_quota"] == 50, "新用户默认额度"
-    assert body["ai_used_today"] == 0
     assert "password_hash" not in body, "出参绝不能带口令哈希"
 
 
-def test_me_counts_only_successful_calls_today(open_client):
-    """今天已用 = 今天 status='ok' 的调用数；失败的、昨天的、别人的都不算。"""
+def test_me_has_no_ai_quota_fields(open_client):
+    """额度功能已取消（2026-11-10）：字段必须彻底消失，不是返回空值。
+
+    留着字段但恒返回 0/None 会让前端和别人以为「额度还是 0，是不是用完了」，
+    所以这里直接断言 key 不存在。
+    """
     _register(open_client)
     token = _token(open_client)
-    with new_session() as s:
-        uid = s.query(User).filter_by(username="alice").one().id
-        now = datetime.now(UTC).replace(tzinfo=None)
-        yesterday = now - timedelta(days=2)
-        s.add_all(
-            [
-                UsageLog(user_id=uid, purpose="chat", model="m", status="ok"),
-                UsageLog(user_id=uid, purpose="chat", model="m", status="ok"),
-                UsageLog(user_id=uid, purpose="chat", model="m", status="failed"),
-                UsageLog(user_id=uid + 100, purpose="chat", model="m", status="ok"),
-                UsageLog(
-                    user_id=uid, purpose="chat", model="m", status="ok", created_at=yesterday
-                ),
-            ]
-        )
-        s.commit()
-
     body = open_client.get(
         f"{API}/auth/me", headers={"Authorization": f"Bearer {token}"}
     ).json()
-    assert body["ai_used_today"] == 2, "只算本人 + 今天 + status=ok"
+
+    assert "daily_ai_quota" not in body
+    assert "ai_used_today" not in body
 
 
 def test_me_requires_token(open_client):

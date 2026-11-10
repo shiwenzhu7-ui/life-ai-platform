@@ -35,7 +35,7 @@ class LocalBGEEmbedding:      # sentence-transformers
 
 ```text
 1. POST /ai/chat
-2. 校验额度（users.daily_ai_quota vs 当日 ai_usage_logs 计数）
+2. 校验额度 —— **已取消**（2026-11-10：AI 调用不设上限，`daily_ai_quota` 列已删除）
 3. 取/建 chat_sessions，落 user 消息到 chat_messages
 4. 构造上下文：
      - system 提示词（含当前时间、时区、可用分类枚举、用户角色）
@@ -453,10 +453,13 @@ DELETE /documents/{id}
 | 项 | 规则 |
 |---|---|
 | 计数时机 | 每次 LLM 调用（含重试）都写 `ai_usage_logs` |
-| 配额窗口 | 自然日，`Asia/Shanghai` 00:00 重置 |
-| 默认额度 | `user` 50 次/日，`vip` 200 次/日（`users.daily_ai_quota` 可单独调整） |
+| 配额窗口 | **无** —— 2026-11-10 起 AI 调用不设上限，`users.daily_ai_quota` 已删除 |
+| 默认额度 | ~~`user` 50 次/日~~ 已取消 |
 | Embedding | 本地模型不计费，仍记录耗时与块数 |
 | 成本估算 | `token_in × 单价 + token_out × 单价`，单价在 `ai_model_configs.params` 配置 |
+
+> `ai_usage_logs` 仍然每条都写 —— 它不用于限额，只用于成本估算与 V1.4 管理后台的调用明细展示。
+> 如果以后要做防滥用限流，应在网关/中间件层按 IP 或令牌做，不恢复用户级额度。
 
 ---
 

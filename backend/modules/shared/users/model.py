@@ -11,7 +11,7 @@ V1.2：一次性补成「JWT 用户系统」需要的全部列（迁移 b1users�
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Enum, Index, Integer, String, func, text
+from sqlalchemy import BigInteger, DateTime, Enum, Index, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db import Base
@@ -61,11 +61,6 @@ class User(Base):
     # disabled 的用户即使密码正确也不许登录（403 USER_DISABLED）
     status: Mapped[str] = mapped_column(
         Enum(*STATUSES, name="user_status"), nullable=False, server_default="active"
-    )
-
-    # 每日 AI 调用额度。真正拦截是后续版本的事，这里先把口径建好
-    daily_ai_quota: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("50")
     )
 
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

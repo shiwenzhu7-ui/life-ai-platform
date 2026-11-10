@@ -3,7 +3,7 @@
     POST /auth/register  201  注册，返回 {id, username, role}
     POST /auth/login     200  登录，返回 access_token / token_type / expires_in / user
     POST /auth/logout    204  退出（本地 JWT 阶段无状态，前端清 token）
-    GET  /auth/me        200  当前用户（含 daily_ai_quota、ai_used_today）
+    GET  /auth/me        200  当前用户信息
 
 本文件只做两件事：把请求体交给 service、把返回值翻译成状态码。
 业务判断一律在 service.py —— 这样 service 能脱离 HTTP 单测。
@@ -50,6 +50,6 @@ def logout(user_id=Depends(get_current_user)) -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.get("/me", response_model=UserOut, summary="当前用户信息（含 AI 额度用量）")
-def me(db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> UserOut:
-    return service.me(db, user)
+@router.get("/me", response_model=UserOut, summary="当前用户信息")
+def me(user: User = Depends(get_current_user)) -> UserOut:
+    return service.me(user)

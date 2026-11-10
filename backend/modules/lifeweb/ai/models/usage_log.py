@@ -4,11 +4,13 @@
 
 每次调模型写一行，两个用途：
 
-1. **配额**：`SELECT COUNT(*) WHERE user_id=? AND created_at >= 今天 00:00`，
-   与 `users.daily_ai_quota` 比较（V1.2 引入真实用户后才有意义，现在恒为演示用户）。
-2. **成本**：`cost_estimate` 是**估算值**，不是账单。用 token 数 × 单价算出来，
+1. **成本**：`cost_estimate` 是**估算值**，不是账单。用 token 数 × 单价算出来，
    单价来自配置（`Settings.llm_price_in_per_mtok` / `llm_price_out_per_mtok`，
    元/百万 token），默认 0 表示「只记 token 不估价」，要改只改 `.env`。
+2. **调用明细**：V1.4 管理后台展示用。
+
+「每日调用额度」已于 2026-11-10 取消（用户要求无限制），
+所以本表**不是**配额计数器，`users.daily_ai_quota` 列也一并删了（迁移 c1noquota）。
 
 和 `chat_messages.token_in/token_out` 的关系：那张表记「这条消息花了多少」，
 本表记「这次调用花了多少」。一次用户提问可能触发多次模型调用（工具循环），

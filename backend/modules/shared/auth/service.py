@@ -1,6 +1,6 @@
 """认证业务逻辑（V1.2）。
 
-这里只做「决定」：这个人能不能注册、这对账号口令对不对、他今天用了多少次 AI。
+这里只做「决定」：这个人能不能注册、这对账号口令对不对。
 HTTP 状态码由 router 翻译 —— service 抛 AppError，router 不写 if。
 
 两条安全约定：
@@ -10,14 +10,13 @@ HTTP 状态码由 router 翻译 —— service 抛 AppError，router 不写 if�
        哪些账号被禁用了。
 """
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from core.config import settings
 from core.errors import conflict, unauthorized, validation_error
 from core.security import create_access_token, hash_password, verify_password
 from core.time import now_utc
-from modules.lifeweb.ai.models import UsageLog
 from modules.shared.auth.schema import LoginIn, RegisterIn, TokenOut, UserBrief, UserOut
 from modules.shared.users.model import User
 
@@ -81,36 +80,15 @@ def login(db: Session, data: LoginIn) -> TokenOut:
     )
 
 
-def ai_used_today(db: Session, user_id: int) -> int:
-    """今天（服务器本地日期）成功的 AI 调用次数。
+def me(user: User) -> UserOut:
+    """当前用户信息。role/status 由依赖层校验过（get_current_user）。
 
-    口径：`ai_usage_logs` 里 status='ok' 的行数 —— 即「模型调用次数」，
-    不是「对话轮数」：一次提问触发工具循环会算多次，摘要调用另算一次。
-    失败的调用**不计**：用户没拿到服务却被扣额度不合理；
-    靠故意制造失败来刷额度的问题应该由限流解决，不该用额度去堵。
-
-    SQL 用范围条件（>= 今天 0 点）而不是 DATE(created_at)=CURDATE()：
-    后者会让 idx_usage_user_time 的 created_at 部分失效，退化成扫全表。
-    created_at 由 MySQL 的 NOW() 写入，CURDATE() 与之同一时区，不会错位。
+    V1.2 曾在这里顺带返回 AI 每日额度与今日已用次数（要查一次 ai_usage_logs）。
+    2026-11-10 取消额度限制后，这里不再碰数据库 —— 连 db 参数都不需要了。
     """
-    return db.scalar(
-        select(func.count())
-        .select_from(UsageLog)
-        .where(
-            UsageLog.user_id == user_id,
-            UsageLog.created_at >= func.curdate(),
-            UsageLog.status == "ok",
-        )
-    ) or 0
-
-
-def me(db: Session, user: User) -> UserOut:
-    """当前用户信息。role/status 由依赖层校验过（get_current_user）。"""
     return UserOut(
         id=user.id,
         username=user.username,
         nickname=user.nickname,
         role=user.role,
-        daily_ai_quota=user.daily_ai_quota,
-        ai_used_today=ai_used_today(db, user.id),
     )
