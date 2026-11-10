@@ -26,14 +26,18 @@
       <el-header height="56px" class="layout__header">
         <span class="layout__title">{{ $route.meta.title || '' }}</span>
 
-        <!-- V1.0 没有登录，用户固定是后端 core/deps.py 里的 DEMO_USER_ID = 1 -->
-        <div class="layout__user">
-          <i class="el-icon-user-solid" />
-          <span>演示用户 #1</span>
-          <el-tooltip content="V1.2 接入登录后这里换成真实用户" placement="bottom-end">
-            <i class="el-icon-question layout__user-help" />
-          </el-tooltip>
-        </div>
+        <!-- 真实登录用户（V1.2）。displayName 来自 store/modules/user.js：
+             有昵称用昵称，没有用账号名；/auth/me 还没回来时先显示账号名兜底 -->
+        <el-dropdown trigger="click" class="layout__user-dropdown" @command="onUserCommand">
+          <div class="layout__user">
+            <i class="el-icon-user-solid" />
+            <span>{{ displayName }}</span>
+            <i class="el-icon-arrow-down layout__user-arrow" />
+          </div>
+          <el-dropdown-menu slot="dropdown">
+            <el-dropdown-item command="logout">退出登录</el-dropdown-item>
+          </el-dropdown-menu>
+        </el-dropdown>
       </el-header>
 
       <el-main class="layout__main">
@@ -44,6 +48,8 @@
 </template>
 
 <script>
+import { mapGetters } from 'vuex'
+
 // 菜单项与 router 里的路径一一对应；改路径要两边一起改。
 const MENUS = [
   { path: '/', title: '首页', icon: 'el-icon-s-home' },
@@ -60,9 +66,34 @@ export default {
     }
   },
   computed: {
+    ...mapGetters('user', ['displayName']),
+
     // default-active 用 path 精确匹配，/ 这种根路径直接相等
     activeMenu() {
       return this.$route.path
+    }
+  },
+  created() {
+    // 刷新页面后 Vuex 里只有令牌、没有用户信息，这里补一次 /auth/me。
+    // action 内部有并发去重和失败兜底，重复调用是安全的。
+    this.$store.dispatch('user/fetchMe')
+  },
+  methods: {
+    async onUserCommand(command) {
+      if (command !== 'logout') return
+      try {
+        await this.$confirm('确定退出登录吗？', '提示', {
+          confirmButtonText: '退出',
+          cancelButtonText: '取消',
+          type: 'warning'
+        })
+      } catch (e) {
+        return // 用户点了取消
+      }
+      // action 内部已经处理了「后端挂了也要清本地令牌」
+      await this.$store.dispatch('user/logout')
+      // 用 replace 而不是 push：退出后不该能点「后退」回到刚才那个页面
+      this.$router.replace('/login')
     }
   }
 }
@@ -118,17 +149,25 @@ export default {
     color: #303133;
   }
 
+  &__user-dropdown {
+    cursor: pointer;
+  }
+
   &__user {
     display: flex;
     align-items: center;
     gap: 6px;
     font-size: 13px;
     color: #606266;
+
+    &:hover {
+      color: #409eff;
+    }
   }
 
-  &__user-help {
+  &__user-arrow {
     color: #c0c4cc;
-    cursor: help;
+    font-size: 12px;
   }
 
   &__main {

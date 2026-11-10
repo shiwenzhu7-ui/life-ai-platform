@@ -1,6 +1,8 @@
 import axios from 'axios'
 import { Message } from 'element-ui'
 
+import { clearToken, getToken } from './auth'
+
 // ---------------------------------------------------------------------------
 // 全项目唯一的请求出口。
 // 页面/组件不允许直接 import axios，也不允许自己拼 url 和弹错误提示。
@@ -80,9 +82,51 @@ const service = axios.create({
 })
 
 service.interceptors.request.use((config) => {
-  // V1.0 没有登录态，这里先留空。V1.2 接 SSO 后在这一行塞 Authorization。
+  const token = getToken()
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
   return config
 })
+
+// ---------- 鉴权：登录失效时统一处理 ----------
+//
+// 两个必须区分的场景：
+//   1. 业务接口 401 —— 令牌没了/坏了/过期了 → 清令牌、跳登录、记住原来在哪
+//   2. 登录接口 401 —— 用户只是**输错了密码** → 绝不能跳走
+//      否则会出现「在登录页输错一次，页面重载、表单被清空」的诡异体验。
+//
+// 这里不用 router 而用 window.location.replace：request.js 被 router 的模块依赖链
+// 外面引用着，import router 容易绕成循环依赖；而且换页时整份内存状态本来也该重置。
+
+function redirectToLogin() {
+  const current = window.location
+  const target = `${current.pathname}${current.search}`
+  if (target === '/' || target.startsWith('/login')) {
+    window.location.replace('/login')
+    return
+  }
+  // 用 encodeURIComponent 而不是 URLSearchParams：后者会把 '/' 编码成 %2F，
+  // 虽然合法，但地址栏里一团乱，排查时读不出来。
+  window.location.replace(`/login?redirect=${encodeURIComponent(target)}`)
+}
+
+// 防止并发请求同时 401 时弹出一排红条、跳转被触发好几次
+let redirecting = false
+
+function handleUnauthorized() {
+  clearToken()
+  if (redirecting) return
+  redirecting = true
+  Message.warning('登录已过期，请重新登录')
+  // 稍等一下再跳，让用户看清提示；否则页面一闪就换了，反而莫名其妙
+  window.setTimeout(redirectToLogin, 800)
+}
+
+function isAuthEntryUrl(url) {
+  const path = String(url || '')
+  return path.includes('/auth/login') || path.includes('/auth/register')
+}
 
 service.interceptors.response.use(
   // 后端成功时直接返回业务对象，没有 { code, data } 包装，所以这里直接解一层
@@ -104,6 +148,21 @@ service.interceptors.response.use(
       const body = response.data || {}
       code = body.code || `HTTP_${status}`
       message = pickMessage(status, body)
+
+      // 401 且不是登录/注册接口 → 令牌失效，清本地状态并回登录页。
+      // /auth/me 的 silent 只影响「弹不弹红条」，不影响这里 ——
+      // 它同样说明登录态已经没了。
+      if (status === 401 && !isAuthEntryUrl(config.url)) {
+        handleUnauthorized()
+        // 这条路径上不再弹 error 红条，handleUnauthorized 的 warning 已经说明了原因
+        const err = new Error(message)
+        err.status = status
+        err.code = code
+        err.detail = (body && body.detail) || null
+        err.response = response
+        err.authExpired = true
+        return Promise.reject(err)
+      }
     }
 
     // config.silent === true 时不弹提示，交给调用方自己处理
