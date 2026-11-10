@@ -20,6 +20,7 @@ from core.errors import register_exception_handlers
 from modules.adminweb import router as adminweb_router
 from modules.analyticsweb import router as analyticsweb_router
 from modules.lifeweb import router as lifeweb_router
+from modules.shared.auth import router as auth_router
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
 
@@ -41,6 +42,7 @@ register_exception_handlers(app)
 app.include_router(lifeweb_router, prefix=settings.api_v1_prefix)  # 生活管理端
 app.include_router(analyticsweb_router, prefix=settings.api_v1_prefix)  # 数据分析端
 app.include_router(adminweb_router, prefix=settings.api_v1_prefix)  # 系统管理后台
+app.include_router(auth_router, prefix=settings.api_v1_prefix)  # 认证（三端共用）
 
 
 # ---------- 运维探针（不带 /api/v1 前缀） ----------

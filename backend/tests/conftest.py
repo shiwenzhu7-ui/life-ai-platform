@@ -160,10 +160,13 @@ def _clean_db():
     """每个用例前后都清空业务表，并重新插入 41 条系统分类。
 
     顺手把「当前用户」钉死成 1 号。V1.0 的 `get_current_user_id` 写死返回
-    `DEMO_USER_ID`；这里显式覆盖成同一个值，不是为了改变行为，而是为了让
-    「当前用户是谁」在各测试里**可预期**：越权用例可以把 user_id=2 的数据
-    造出来，再确认 1 号用户看不见，而不用依赖某个模块里写死的常量。
+    `DEMO_USER_ID`；V1.2 起它真去解 JWT 了，测试必须显式覆盖，否则 500 多个
+    用例会全部 401。这不是为了改变行为，而是为了让「当前用户是谁」在各测试里
+    **可预期**：越权用例可以把 user_id=2 的数据造出来，再确认 1 号用户看不见，
+    而不用依赖某个模块里写死的常量。
     需要冒充别的用户时，在用例里再 `app.dependency_overrides[...] = lambda: 2`。
+    想测**真实**的登录链路（含 401/403）就 `app.dependency_overrides.clear()`，
+    见 tests/test_auth_guards.py 的做法。
     """
     app.dependency_overrides[get_current_user_id] = lambda: 1
     _clear_tables()

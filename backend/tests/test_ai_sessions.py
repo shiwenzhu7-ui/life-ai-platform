@@ -35,7 +35,10 @@ def _acting_as(user_id: int):
     try:
         yield
     finally:
-        app.dependency_overrides.pop(get_current_user_id, None)
+        # 退出时必须还原成 1 号而不是直接删掉：conftest 的 _clean_db 每个用例只
+        # 设一次覆盖，这里 pop 掉的话，同一用例里后续的请求就会真的去解 JWT，
+        # 变成 401（没有 Authorization 头）。
+        app.dependency_overrides[get_current_user_id] = lambda: 1
 
 
 def _make_session(
