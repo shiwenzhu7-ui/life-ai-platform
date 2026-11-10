@@ -37,6 +37,17 @@ class Settings(BaseSettings):
     # ---------- 跨域 ----------
     cors_origins: str = "http://localhost:8080,http://localhost:8081,http://localhost:8082"
 
+    # ---------- 认证（V1.2）----------
+    # 密钥只放 .env（已 gitignore），绝不打日志、绝不进响应体（NFR 11.1）。
+    # 默认空串：没配时 core.security 拒绝签发令牌，而不是拿空串签出一个
+    # 「任何人都能伪造」的通行证 —— 安静地不安全工作，比大声失败更危险。
+    jwt_secret: str = ""
+    # 只允许对称算法；V2.0 换 Keycloak 时改成 RS256 + JWKS 公钥验签
+    jwt_algorithm: str = "HS256"
+    # 令牌有效期（分钟），从签发那一刻算起，不随使用续期。
+    # 接口返回的 expires_in = 本值 × 60（docs/接口设计.md §3 的 7200）
+    jwt_expire_minutes: int = 120
+
     # ---------- LLM（V1.1 AI 助手）----------
     # 密钥只从环境变量读、绝不落库也绝不打进日志（NFR 11.1）。
     # 默认空串：没配 key 时 AI 接口应当明确报「未配置」，而不是拿假 key 去调、

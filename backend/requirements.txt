@@ -17,6 +17,11 @@ pydantic
 pydantic-settings
 tzdata
 
+# 认证（V1.2）
+# 不用 passlib：已停维护，与 bcrypt>=4.1 冲突时报 __about__（见 docs/工程规范.md §2.1）
+PyJWT
+pwdlib[bcrypt]
+
 # 测试
 pytest
 pytest-asyncio

@@ -27,12 +27,16 @@ class AppError(Exception):
         message: str,
         status_code: int = 400,
         detail: dict | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.status_code = status_code
         self.detail = detail
+        # 少数错误需要额外响应头：401 要带 WWW-Authenticate: Bearer，
+        # 前端拦截器靠它区分「该跳登录」和「该提示权限不足」。
+        self.headers = headers
 
 
 def _body(code: str, message: str, detail: dict | None = None) -> dict:
@@ -43,6 +47,7 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
         content=_body(exc.code, exc.message, exc.detail),
+        headers=exc.headers,
     )
 
 
@@ -127,7 +132,13 @@ def forbidden(message: str = "无权访问") -> AppError:
 
 
 def unauthorized(message: str = "未登录或登录已过期") -> AppError:
-    return AppError("UNAUTHORIZED", message, 401)
+    # 401 必须带 WWW-Authenticate（RFC 7235）；浏览器/axios 靠它决定是否清令牌跳登录
+    return AppError("UNAUTHORIZED", message, 401, headers={"WWW-Authenticate": "Bearer"})
+
+
+def user_disabled(message: str = "账号已被禁用") -> AppError:
+    """令牌有效但账号被停用。和 401 分开：这不是「重新登录能解决」的问题。"""
+    return AppError("USER_DISABLED", message, 403)
 
 
 def conflict(message: str = "资源冲突") -> AppError:
