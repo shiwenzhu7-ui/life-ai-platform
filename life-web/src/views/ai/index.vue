@@ -59,6 +59,12 @@
               @confirm="handleConfirm"
               @cancel="handleCancel"
             />
+            <!-- 引用来源挂在回答下面：用户要能当场核对「这是从我文件里读来的」，
+                 而不是信一个看起来很像答案的东西。空数组时整个组件不出现 -->
+            <ReferenceList
+              v-if="item.role === 'assistant' && item.references && item.references.length"
+              :references="item.references"
+            />
             <div v-if="item.status === 'failed'" class="ai__retry">
               <span class="ai__retry-text">
                 {{ item.role === 'user' ? '没发出去' : '这条回复失败了' }}
@@ -118,6 +124,7 @@
 
 <script>
 import PendingActionCard from '@/components/PendingActionCard.vue'
+import ReferenceList from '@/components/ReferenceList.vue'
 import {
   cancelAction,
   chat,
@@ -131,7 +138,7 @@ import { formatDateTime as fmtDateTime } from '@/utils/format'
 
 export default {
   name: 'AiView',
-  components: { PendingActionCard },
+  components: { PendingActionCard, ReferenceList },
   data() {
     return {
       sessions: [],
@@ -294,7 +301,10 @@ export default {
           created_at: new Date().toISOString(),
           // 后端说「有动作待确认」时，卡片跟着这条消息渲染；
           // 为 null（纯聊天）时什么都不加，界面和以前一样
-          pending_action: res.pending_action || null
+          pending_action: res.pending_action || null,
+          // 这一轮如果检索了知识库并命中，后端会带回出处；
+          // 不传上去的话，刷新一下引用区就没了，而界面看起来毫无变化
+          references: res.references || []
         })
         this.scrollToBottom()
         // 首句会把「新对话」改成本句开头，左栏要跟着变
@@ -406,8 +416,7 @@ export default {
       return fmtDateTime(session.last_message_at || session.created_at)
     },
 
-
-  //将消息区滚动到最底部：
+    // 将消息区滚动到最底部：
     scrollToBottom() {
       this.$nextTick(() => {
         const el = this.$refs.messagesEl

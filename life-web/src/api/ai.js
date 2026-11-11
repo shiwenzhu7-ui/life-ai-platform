@@ -29,6 +29,8 @@ export function getSession(sessionId, options) {
 // order=desc 时第一页是最新 N 条，前端按「旧 → 新」显示要自己反转。
 // 每项除了正文，还带 pending_action：这条助手消息产生的确认卡片（没有则为 null），
 // 刷新页面后靠它把卡片原样画回来。
+// references 同理：这一轮检索命中的知识库出处，存在消息上，刷新后照样能画出来。
+// 没有引用时是空数组，不是 null。
 export function listMessages(sessionId, params, options) {
   return request.get(`/ai/sessions/${sessionId}/messages`, {
     params: compactParams(params),
@@ -36,10 +38,11 @@ export function listMessages(sessionId, params, options) {
   })
 }
 
-// POST /ai/chat → { session_id, message_id, reply, pending_action, usage }
+// POST /ai/chat → { session_id, message_id, reply, pending_action, usage, references }
 // 模型可能要几十秒，必须覆盖全局 10s 超时：
 // 超时早了，后端其实成功、库里已有回复，用户却以为没发出去会重发一次。
 // pending_action 不为 null 时表示「模型想改数据但还没改」，前端要渲染确认卡片。
+// references 是这一轮检索到的知识库出处（文件/页码/段落/摘要），没有命中时为空数组。
 export function chat(payload, options) {
   return request.post('/ai/chat', payload, { timeout: 70000, ...options })
 }

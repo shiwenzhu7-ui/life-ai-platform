@@ -39,6 +39,12 @@ const routes = [
         meta: { title: '消费' }
       },
       {
+        path: 'knowledge',
+        name: 'knowledge',
+        component: () => import('../views/knowledge/index.vue'),
+        meta: { title: '知识库' }
+      },
+      {
         path: 'ai',
         name: 'ai',
         component: () => import('../views/ai/index.vue'),
