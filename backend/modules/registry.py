@@ -17,15 +17,21 @@ from modules.lifeweb.ai.models import ChatSession  # noqa: F401
 from modules.lifeweb.ai.models import PendingAction  # noqa: F401
 from modules.lifeweb.ai.models import UsageLog  # noqa: F401
 from modules.lifeweb.expenses.model import Expense  # noqa: F401
+from modules.lifeweb.knowledge.models import AsyncTask  # noqa: F401
+from modules.lifeweb.knowledge.models import Document  # noqa: F401
+from modules.lifeweb.knowledge.models import DocumentChunk  # noqa: F401
 from modules.lifeweb.shopping.model import ShoppingItem, ShoppingList  # noqa: F401
 from modules.lifeweb.tasks.model import Task  # noqa: F401
 from modules.shared.categories.model import Category  # noqa: F401
 from modules.shared.users.model import User  # noqa: F401
 
 __all__ = [
+    "AsyncTask",
     "Category",
     "ChatMessage",
     "ChatSession",
+    "Document",
+    "DocumentChunk",
     "Expense",
     "PendingAction",
     "ShoppingItem",

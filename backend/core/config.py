@@ -66,6 +66,33 @@ class Settings(BaseSettings):
     # 不用回滚代码。默认开。
     llm_tools_enabled: bool = True
 
+    # ---------- 知识库 / RAG（V1.3）----------
+    # 向量库跑在虚拟机里的 Milvus standalone（Windows 上没装 docker，
+    # 而 Milvus 常驻要 1–2GB，本机内存本来就紧）。默认值指向开发环境的那台；
+    # 换机器就改 .env 的 VECTOR_URI。
+    vector_uri: str = "http://192.168.88.134:19530"
+    vector_db: str = "lifeai"
+    vector_collection: str = "kb_chunks"
+    # 嵌入模型：本地 fastembed 缓存里已有 ONNX 权重，不用联网下载、不装 torch。
+    # 换成别的模型必须同时改 embedding_dim —— 维度变了，旧集合里的向量全部作废。
+    embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    embedding_dim: int = 512
+    # 模型缓存目录。空串 = 用 fastembed 的默认位置；
+    # 本机把权重放在 D 盘（C 盘只剩 ~50GB），所以 .env 里显式指过去。
+    embedding_cache_dir: str = ""
+    # 进程内常驻推理会话。首屏第一次检索要加载 ~0.4s 的模型，
+    # 之后每条向量只要 2ms；但常驻本身占几十 MB，关掉就是每次请求都重新加载。
+    embedding_warmup: bool = True
+
+    # ---------- 文档切分（V1.3）----------
+    # 字符数而非 token 数：中文按字切比分词器结果更稳，也不依赖模型自带的 tokenizer。
+    kb_chunk_size: int = 512
+    kb_chunk_overlap: int = 64
+    # 上传大小上限（字节）。与 docs/接口设计.md §4 的 20MB 对齐。
+    kb_max_upload_bytes: int = 20 * 1024 * 1024
+    # 单次检索返回的片段数（docs/项目规划.md S4：top_k=5）
+    kb_top_k: int = 5
+
     @property
     def llm_ready(self) -> bool:
         """key 是否已配置 —— AI 接口用它决定是不是直接拒绝服务。"""

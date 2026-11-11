@@ -22,6 +22,19 @@ tzdata
 PyJWT
 pwdlib[bcrypt]
 
+# 知识库 / RAG（V1.3）
+# 向量库在虚拟机里（Milvus standalone），这里只要客户端。
+pymilvus
+# 嵌入模型走 ONNX 推理，不装 torch + sentence-transformers：
+# 本地模型 D:\developTools\fastembed_cache 里已有 bge-small-zh-v1.5 的 model_optimized.onnx，
+# 换成 torch 那套要多占约 2.5GB 磁盘和 300–500MB 常驻内存（见 docs/项目规划.md S4）。
+fastembed
+pypdf
+python-docx
+# multipart/form-data 解析。FastAPI 的 UploadFile 依赖它：
+# 不装的话 app 在 import 阶段就抛 "Form data requires python-multipart to be installed"
+python-multipart
+
 # 测试
 pytest
 pytest-asyncio
