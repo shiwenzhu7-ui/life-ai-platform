@@ -126,19 +126,92 @@
 
       <el-table-column label="操作" width="140" align="center">
         <template slot-scope="{ row }">
-          <el-button type="text" size="mini">切块预览</el-button>
-          <el-button type="text" size="mini" class="knowledge__danger">删除</el-button>
+          <el-button
+            type="text"
+            size="mini"
+            :disabled="!previewable(row)"
+            @click="openPreview(row)"
+          >
+            切块预览
+          </el-button>
+          <el-button
+            type="text"
+            size="mini"
+            class="knowledge__danger"
+            :loading="deletingId === row.id"
+            @click="handleDelete(row)"
+          >
+            删除
+          </el-button>
         </template>
       </el-table-column>
     </el-table>
 
     <PaginationBar :page="page" :size="size" :total="total" @change="handlePageChange" />
+
+    <!--
+      切块预览：从右侧滑出的抽屉，不遮挡列表。
+      这个功能的意义是让用户亲眼看到「我的文档被切成了什么样」——
+      PDF 解析出乱码、切块断在半句话上，一眼就能发现；
+      不做的话，只能等 AI 答得离谱再反推是哪里出了问题。
+    -->
+    <el-drawer
+      title="切块预览"
+      :visible.sync="preview.visible"
+      direction="rtl"
+      size="560px"
+      @closed="closePreview"
+    >
+      <div v-if="preview.loading" v-loading="true" class="knowledge__preview-loading" />
+
+      <div v-else-if="preview.error" class="knowledge__preview-error">
+        <p>{{ preview.error }}</p>
+        <el-button size="small" @click="loadPreview">重试</el-button>
+      </div>
+
+      <template v-else>
+        <header class="knowledge__preview-head">
+          <p class="knowledge__preview-title">{{ preview.document.filename }}</p>
+          <p class="knowledge__preview-meta">
+            共 {{ preview.total }} 段
+            <template v-if="preview.truncated">
+              ，这里只显示前 {{ preview.chunks.length }} 段
+            </template>
+          </p>
+        </header>
+
+        <!-- 按页分组：PDF 一页常被切成好几块，逐块重复「第 3 页」很吵；
+             没有页码（DOCX / TXT 整篇算一篇）时分组标题是空的，自然不显示 -->
+        <section
+          v-for="group in previewGroups"
+          :key="group.key"
+          class="knowledge__group"
+        >
+          <h4 v-if="group.label" class="knowledge__group-label">{{ group.label }}</h4>
+          <article
+            v-for="chunk in group.chunks"
+            :key="chunk.id"
+            class="knowledge__chunk"
+          >
+            <p class="knowledge__chunk-head">
+              第 {{ chunk.chunk_index + 1 }} 段
+              <span class="knowledge__chunk-meta">{{ chunk.token_count }} 字</span>
+            </p>
+            <p class="knowledge__chunk-body">{{ chunk.content }}</p>
+          </article>
+        </section>
+
+        <p v-if="!preview.total" class="knowledge__preview-empty">
+          这份文档还没有切块（可能还在处理中，或者处理失败了）
+        </p>
+      </template>
+    </el-drawer>
   </div>
 </template>
 
 <script>
 import { formatDateTime } from '@/utils/format'
-import { uploadDocument, listDocuments } from '@/api/knowledge'
+import { uploadDocument, listDocuments, deleteDocument, getDocument } from '@/api/knowledge'
 import PaginationBar from '@/components/PaginationBar.vue'
 
 // 后端 KB_MAX_UPLOAD_BYTES 的默认值，20MB。
@@ -178,6 +251,11 @@ const POLL_INTERVAL_MS = 3000
 // 400ms 是「手速快的人还在打字、手速慢的人已经想好了」的折中。
 const SEARCH_DEBOUNCE_MS = 400
 
+// 预览抽屉一次拉多少块。后端上限是 200，这里取 50：
+// 一份 512 字符/块的文档，50 段已经是 2.5 万字，够看清「切得对不对」；
+// 真要看全文，用户该回去看原文件，而不是在抽屉里滚动两分钟。
+const PREVIEW_CHUNK_LIMIT = 50
+
 // 判断「还是刚才那批筛选条件吗」：异步返回时要用它比对，
 // 不一致说明用户已经换了条件，这份结果过期了，直接丢掉。
 function sameFilters(a, b) {
@@ -206,6 +284,20 @@ export default {
       // 期间不能再点，所以三个状态都放在页面顶层，而不是每行各存一份。
       uploading: false,
       uploadPercent: 0,
+      // 正在删的那一行 id。用 id 而不是布尔值：删除是行级动作，
+      // 布尔会让整张表的按钮一起转圈，看起来像「所有文件都在删」
+      deletingId: null,
+      // 切块预览抽屉的状态。整块打包成一个对象，是因为「打开 → 加载 →
+      // 成功/失败」永远一起变，拆成四个顶层字段反而容易漏更新其中一个
+      preview: {
+        visible: false,
+        loading: false,
+        error: '',
+        document: {},
+        chunks: [],
+        total: 0,
+        truncated: false
+      },
       statusOptions: Object.keys(STATUS_MAP).map((value) => ({
         value,
         label: STATUS_MAP[value].label
@@ -220,6 +312,26 @@ export default {
     // 当前页里还有没有在处理的文档。用它决定轮询启停。
     hasActive() {
       return this.rows.some((row) => ACTIVE_STATUSES.includes(row.status))
+    },
+
+    // 抽屉里的块按页分组。只做展示层分组，后端返回的顺序本来就是
+    // chunk_index 递增，这里不排序、不去重，免得掩盖后端的问题。
+    previewGroups() {
+      const groups = []
+      this.preview.chunks.forEach((chunk) => {
+        const last = groups[groups.length - 1]
+        if (last && last.pageNo === chunk.page_no) {
+          last.chunks.push(chunk)
+          return
+        }
+        groups.push({
+          key: chunk.page_no === null ? 'no-page' : `page-${chunk.page_no}`,
+          pageNo: chunk.page_no,
+          label: chunk.page_no === null ? '' : `第 ${chunk.page_no} 页`,
+          chunks: [chunk]
+        })
+      })
+      return groups
     }
   },
   watch: {
@@ -346,6 +458,123 @@ export default {
       if (n < 1024) return `${n} B`
       if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
       return `${(n / (1024 * 1024)).toFixed(1)} MB`
+    },
+
+    // ------------------------------------------------------------ 删除
+    //
+    // 后端是**硬删**：documents 行、document_chunks 行、Milvus 里的向量、
+    // uploads 下的原文件，四样一起消失，没有回收站也没有恢复接口。
+    // 所以这里的二次确认不是走过场 —— 它是用户最后一道刹车。
+
+    // 先说清楚「删掉之后会怎样」，而不是只问「确定删除吗」。
+    // 用户真正需要判断的是「这个文件已经没用了」，提示语要指向这件事。
+    async handleDelete(row) {
+      if (this.deletingId !== null) return
+      try {
+        await this.$confirm(`${this.deleteWarning(row)}`, '删除这份文档？', {
+          confirmButtonText: '删除',
+          cancelButtonText: '取消',
+          type: 'warning',
+          // 默认的「确定」按钮是蓝色主按钮，这里换成红色：破坏性操作不该长得像正常操作
+          confirmButtonClass: 'el-button--danger'
+        })
+      } catch (e) {
+        return // 点了取消 / 关掉弹窗
+      }
+
+      this.deletingId = row.id
+      try {
+        await deleteDocument(row.id)
+        this.$message.success(`已删除「${row.filename}」，不会再参与回答`)
+        // 删掉的正好是当前页最后一条时，页码要退一页，
+        // 否则 fetchData 里那段「空页回退」逻辑会先把用户送到最后一页 —— 顺序反了
+        if (this.rows.length === 1 && this.filters.page > 1) {
+          this.filters.page -= 1
+        }
+        await this.fetchData()
+      } catch (e) {
+        // 404 = 别处已经删了（另一个标签页），列表刷新一下即可，不用当错误报
+        if (e && e.status === 404) {
+          this.$message.info('这份文档已经不存在了')
+          await this.fetchData()
+        }
+        // 其它错误（500 / 网络）request.js 已弹过，这里不重复
+      } finally {
+        this.deletingId = null
+      }
+    },
+
+    // 确认框正文。把后果说全：文件本身、切块、向量都会没，AI 也用不了了。
+    // 失败的行没有向量，单独说一句，省得用户以为删掉的东西比实际更多。
+    deleteWarning(row) {
+      const lines = [`「${row.filename}」会被彻底删除，没有回收站，删了不能恢复。`]
+      if (row.status === 'ready' && row.chunk_count) {
+        lines.push(`它的 ${row.chunk_count} 个切块和对应的向量会一起清掉，AI 之后不会再引用它。`)
+      } else if (row.status === 'failed') {
+        lines.push('这份文档处理失败了，没有可用于回答的内容，删除只会清掉记录和原文件。')
+      } else {
+        lines.push('它还在后台处理中，删除后处理会被一并终止。')
+      }
+      return lines.join('\n')
+    },
+
+    // ------------------------------------------------------------ 切块预览
+    //
+    // 只有**已经切好块**的文档才值得看：失败和排队中的没有块，
+    // 点开只会看到一个空抽屉，用户会以为功能坏了。
+    previewable(row) {
+      return row.chunk_count > 0
+    },
+
+    openPreview(row) {
+      if (!this.previewable(row)) return
+      this.preview.visible = true
+      this.preview.loading = true
+      this.preview.error = ''
+      this.preview.document = row
+      this.preview.chunks = []
+      this.preview.total = 0
+      this.preview.truncated = false
+      this.loadPreview()
+    },
+
+    // 详情接口返回 { document, chunks }，chunks 最多 50 条（请求里传的 chunk_limit）。
+    // 没有单独的总数/截断标记，所以「共 N 段」用 document.chunk_count，
+    // 它和 chunks 的长度不一样时，说明抽屉里只显示了前一部分。
+    async loadPreview() {
+      const row = this.preview.document
+      if (!row || !row.id) return
+      this.preview.loading = true
+      this.preview.error = ''
+      try {
+        const data = await getDocument(
+          row.id,
+          { chunk_limit: PREVIEW_CHUNK_LIMIT },
+          { silent: true }
+        )
+        // 请求回来时用户可能已经点了另一个文件
+        if (!this.preview.visible || this.preview.document.id !== row.id) return
+        this.preview.chunks = data.chunks || []
+        // chunk_count 是文档里真实的块数；列表行可能还没刷新成最新值，以详情为准
+        this.preview.total = (data.document && data.document.chunk_count) || this.preview.chunks.length
+        this.preview.truncated = this.preview.total > this.preview.chunks.length
+      } catch (e) {
+        if (!this.preview.visible) return
+        this.preview.error = (e && e.message) || '切块加载失败'
+      } finally {
+        this.preview.loading = false
+      }
+    },
+
+    // 抽屉关掉时清干净：下次打开是新的文件，不能残留上一份的内容
+    closePreview() {
+      this.preview.visible = false
+      this.preview.loading = false
+      this.preview.error = ''
+      this.preview.document = {}
+      this.preview.chunks = []
+      this.preview.total = 0
+      this.preview.truncated = false
     },
 
     // ------------------------------------------------------------ 上传
@@ -496,6 +725,92 @@ export default {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  // ---------------- 切块预览抽屉 ----------------
+
+  &__preview-loading {
+    height: 160px;
+  }
+
+  &__preview-error {
+    padding: 24px 0;
+    text-align: center;
+    font-size: 13px;
+    color: #f56c6c;
+  }
+
+  &__preview-head {
+    padding-bottom: 12px;
+    border-bottom: 1px solid #ebeef5;
+  }
+
+  &__preview-title {
+    margin: 0 0 4px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #303133;
+    word-break: break-all;
+  }
+
+  &__preview-meta {
+    margin: 0;
+    font-size: 12px;
+    color: #909399;
+  }
+
+  &__preview-empty {
+    padding: 24px 0;
+    text-align: center;
+    font-size: 13px;
+    color: #909399;
+  }
+
+  &__group + &__group {
+    margin-top: 16px;
+  }
+
+  &__group-label {
+    margin: 16px 0 8px;
+    padding-left: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #409eff;
+    border-left: 3px solid #409eff;
+  }
+
+  &__chunk {
+    margin-bottom: 10px;
+    padding: 10px 12px;
+    background: #fafbfc;
+    border: 1px solid #ebeef5;
+    border-radius: 4px;
+  }
+
+  &__chunk-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin: 0 0 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #606266;
+  }
+
+  &__chunk-meta {
+    font-weight: 400;
+    color: #c0c4cc;
+  }
+
+  // 正文保留换行（原文里的段落结构对判断「切得对不对」很重要），
+  // 长英文单词/URL 也要能断行，否则会把抽屉撑出横向滚动条
+  &__chunk-body {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.65;
+    color: #303133;
+    white-space: pre-wrap;
+    word-break: break-word;
   }
 
   &__danger {

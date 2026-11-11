@@ -135,7 +135,7 @@ def delete_document(
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ) -> None:
-    """软删文档，同时清掉切块、磁盘文件与 Milvus 向量。
+    """硬删文档，同时清掉切块、磁盘文件与 Milvus 向量。
 
     再删一次返回 404（已经查不到了），删别人的也是 404。
     """
