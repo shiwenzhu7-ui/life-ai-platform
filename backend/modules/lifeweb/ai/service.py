@@ -220,6 +220,16 @@ def chat(
     if not flow.ok:
         assistant.content = flow.reply.content or FALLBACK_FAILED
         assistant.error_message = flow.error_message
+
+    # 引用来源跟着这一条助手消息落库（V1.3）：
+    # 不落库的话，刷新页面后引用卡片就消失了 —— 用户翻历史看到的回答
+    # 像是凭空编的，而这恰恰是 RAG 最需要说清楚的地方。
+    # 存的是 _collect_references 收好的小对象（六个短字段），不是整段原文。
+    if flow.references:
+        assistant.tool_result = {
+            **_tool_result_of(assistant),
+            REFERENCES_KEY: flow.references,
+        }
     crud.touch_session(db, session, added=2, at=now_utc())
 
     cost = _estimate_cost(flow.reply.token_in, flow.reply.token_out)
@@ -254,6 +264,22 @@ def chat(
 
 
 # ---------- 内部 ----------
+
+
+REFERENCES_KEY = "references"
+"""助手消息的 `tool_result` 里存引用列表用的键。
+
+为什么不单开一张 `ai_message_references` 表：引用最多 5 条、每条六个短字段，
+加起来通常不到 1KB，为此建表 + 建索引 + 加一次 N+1 查询不值得。
+换个角度说，引用是「这条消息的附属事实」，生命周期和消息完全一致，
+放在同一行里天然满足「删消息即删引用」。
+"""
+
+
+def _tool_result_of(msg: ChatMessage) -> dict:
+    """取消息现有的 tool_result，非 dict（NULL / 老数据）时返回空字典。"""
+    value = msg.tool_result
+    return value if isinstance(value, dict) else {}
 
 
 def _apply_reply(

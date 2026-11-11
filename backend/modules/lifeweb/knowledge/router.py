@@ -8,7 +8,7 @@
     POST   /knowledge/documents            上传（202，立刻返回，后台处理）
     GET    /knowledge/documents            我的文档列表
     GET    /knowledge/documents/{id}       详情（含前 50 个切块）
-    DELETE /knowledge/documents/{id}       删除（软删 + 清向量 + 删磁盘文件）
+    DELETE /knowledge/documents/{id}       删除（硬删 + 清向量 + 删磁盘文件）
 
 为什么上传返回 202 而不是 201：201 表示「资源已创建且可用」，
 而这里文档只是插了一行 `pending`，真正可检索要等后台跑完 ——

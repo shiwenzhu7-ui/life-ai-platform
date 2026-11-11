@@ -172,11 +172,20 @@ class MessageOut(BaseModel):
         default=None,
         description="这条助手消息产生的待确认卡片；没有则为 null（A5 第 6 步）",
     )
+    references: list["ReferenceOut"] = Field(
+        default_factory=list,
+        description="这条助手消息产生时用到的知识库引用；从 tool_result 还原（V1.3）",
+    )
 
     @classmethod
     def from_model(cls, message, pending=None) -> "MessageOut":
         """`pending` 由调用方批量查好传进来 —— 让 ORM 对象自己反向查表
-        会在列表循环里触发 N+1 查询，而且把查询职责塞进了 schema 层。"""
+        会在列表循环里触发 N+1 查询，而且把查询职责塞进了 schema 层。
+
+        references 是**从落库的 tool_result 里还原**的，不是重新检索一次：
+        重新检索会拿到「现在」最相似的段落，可能和当时模型看到的不是同一批，
+        引用就对不上了；而且读消息列表不该产生嵌入计算。
+        """
         return cls(
             id=message.id,
             role=message.role,
@@ -192,6 +201,7 @@ class MessageOut(BaseModel):
             pending_action=(
                 PendingActionOut.from_model(pending) if pending is not None else None
             ),
+            references=references_from_tool_result(message.tool_result),
         )
 
 
@@ -291,6 +301,32 @@ class ReferenceOut(BaseModel):
     chunk_index: int | None = Field(default=None, description="这份文件里的第几段，从 0 开始")
     snippet: str = Field(description="命中原文的前 120 字，用于卡片预览")
     score: float | None = Field(default=None, description="余弦相似度，越大越相关（调试用）")
+
+
+def references_from_tool_result(tool_result: Any) -> list[ReferenceOut]:
+    """从落库的 `tool_result` 里还原引用列表。
+
+    键名 `references` 与 `service.REFERENCES_KEY` 必须一致；这里不 import
+    service，是因为 service 反过来 import schema，会成环。
+
+    对脏数据一律宽容：不是 dict、键不存在、某一条字段缺失 → 跳过那一条。
+    读历史消息是只读路径，宁可少画一张卡，也不能因为一条坏数据让整个
+    会话打不开。
+    """
+    if not isinstance(tool_result, dict):
+        return []
+    raw = tool_result.get("references")
+    if not isinstance(raw, list):
+        return []
+    items: list[ReferenceOut] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            items.append(ReferenceOut(**entry))
+        except (TypeError, ValueError):
+            continue
+    return items
 
 
 class ChatResponse(BaseModel):

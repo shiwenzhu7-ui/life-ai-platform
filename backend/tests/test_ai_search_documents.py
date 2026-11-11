@@ -21,11 +21,12 @@ from __future__ import annotations
 import json
 
 import pytest
+from fastapi.testclient import TestClient
 
 from conftest import API, new_session
 
 from app import app
-from modules.lifeweb.ai.models import PendingAction
+from modules.lifeweb.ai.models import ChatMessage, PendingAction
 from modules.lifeweb.ai.provider import FakeProvider, LLMReply
 from modules.lifeweb.ai.router import get_provider
 from modules.lifeweb.knowledge import service as knowledge_service
@@ -394,3 +395,75 @@ def test_plain_chat_has_empty_references(client, provider, fake_store):
     body = _chat(client, "你好").json()
 
     assert body["references"] == []
+
+
+# ---------- 引用落库（刷新页面后还在） ----------
+
+
+def _messages_of(session_id: int) -> list[dict]:
+    with TestClient(app) as client:
+        res = client.get(f"{API}/ai/sessions/{session_id}/messages", params={"order": "desc"})
+    assert res.status_code == 200, res.text
+    return res.json()["items"]
+
+
+def test_references_are_persisted_on_the_assistant_message(client, provider, fake_store):
+    """刷新后引用卡片不能消失：消息列表要把 references 带回来。"""
+    doc_id, chunks = _seed_doc(filename="家庭预算.txt", contents=("这个月房贷 4200 元。",))
+    _index_vectors(fake_store, doc_id, chunks)
+    provider.queue(_reply(calls=[_call(query="房贷")])).queue(_reply("每月 4200 元。"))
+
+    body = _chat(client, "我文件里房贷多少").json()
+
+    # 聊天接口和消息列表两条路径必须给出同样的一份引用
+    items = _messages_of(body["session_id"])
+    assistant = next(row for row in items if row["role"] == "assistant")
+    assert assistant["id"] == body["message_id"]
+    assert assistant["references"] == body["references"]
+    assert assistant["references"][0]["chunk_id"] == chunks[0]
+
+
+def test_messages_without_references_carry_empty_list(client, provider, fake_store):
+    """老消息（这一版之前落的）没有引用键，也要返回空数组而不是报错。"""
+    provider.queue(_reply("你好。"))
+
+    session_id = _chat(client, "你好").json()["session_id"]
+
+    items = _messages_of(session_id)
+    assert items[0]["references"] == []
+
+
+def test_corrupted_reference_rows_are_skipped(client, provider, fake_store):
+    """库里被人手工改坏了，也不能让整个会话打不开：坏的那条跳过，好的照常返回。"""
+    provider.queue(_reply(calls=[_call(query="房贷")])).queue(_reply("每月 4200 元。"))
+    body = _chat(client, "我文件里房贷多少").json()
+
+    with new_session() as s:
+        message = s.get(ChatMessage, body["message_id"])
+        message.tool_result = {
+            "references": [
+                {"document_id": 1, "chunk_id": 2, "filename": "好的.txt", "snippet": "原文"},
+                {"document_id": "不是数字"},
+                "根本不是对象",
+            ]
+        }
+        s.commit()
+
+    items = _messages_of(body["session_id"])
+    assistant = next(row for row in items if row["id"] == body["message_id"])
+    assert [row["filename"] for row in assistant["references"]] == ["好的.txt"]
+
+
+def test_long_answer_keeps_references_alongside_summary(client, provider, fake_store):
+    """tool_result 将来若被别的东西占用，引用也不能因此丢失。"""
+    doc_id, chunks = _seed_doc(filename="合同.txt", contents=("租期两年，押金三个月房租。",))
+    _index_vectors(fake_store, doc_id, chunks)
+    provider.queue(_reply(calls=[_call(query="租期多久")])).queue(_reply("租期两年。"))
+
+    body = _chat(client, "我的合同租期多久").json()
+
+    with new_session() as s:
+        row = s.get(ChatMessage, body["message_id"])
+        assert isinstance(row.tool_result, dict)
+        assert len(row.tool_result["references"]) == 1
+        assert row.tool_result["references"][0]["filename"] == "合同.txt"
