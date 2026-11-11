@@ -34,6 +34,7 @@ from modules.lifeweb.ai.schema import (
     CreatedOut,
     MessageOut,
     PendingActionOut,
+    ReferenceOut,
     SessionCreate,
     SessionOut,
     SessionUpdate,
@@ -242,6 +243,7 @@ def chat(
         message_id=assistant.id,
         reply=assistant.content or "",
         pending_action=pending,
+        references=[ReferenceOut(**item) for item in turn.references],
         usage=UsageOut(
             token_in=turn.token_in,
             token_out=turn.token_out,

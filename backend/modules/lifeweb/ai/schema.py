@@ -277,6 +277,22 @@ class ActionOut(BaseModel):
     executed_at: str | None = Field(default=None, description="执行时间（北京时间 ISO）")
 
 
+class ReferenceOut(BaseModel):
+    """一条知识库引用：答案里的这一句出自哪份文件的哪一段。
+
+    只在模型这一轮**真的调了检索**且命中时才出现在 `references` 里；
+    普通聊天和查待办/查账都不会有它。前端据此决定要不要画引用区。
+    """
+
+    document_id: int = Field(description="文档 id，可用来调 /knowledge/documents/{id}")
+    chunk_id: int = Field(description="切块 id；同一份文件的多段用它区分")
+    filename: str = Field(description="文件名，原是用户上传时的名字")
+    page_no: int | None = Field(default=None, description="页码；DOCX/TXT 没有页概念，为 null")
+    chunk_index: int | None = Field(default=None, description="这份文件里的第几段，从 0 开始")
+    snippet: str = Field(description="命中原文的前 120 字，用于卡片预览")
+    score: float | None = Field(default=None, description="余弦相似度，越大越相关（调试用）")
+
+
 class ChatResponse(BaseModel):
     """一问一答的响应。
 
@@ -290,5 +306,9 @@ class ChatResponse(BaseModel):
     pending_action: PendingActionOut | None = Field(
         default=None,
         description="不为空表示有动作待用户确认；此时业务数据尚未写入",
+    )
+    references: list[ReferenceOut] = Field(
+        default_factory=list,
+        description="知识库引用来源；只有检索命中时非空，普通聊天为空数组（V1.3）",
     )
     usage: UsageOut

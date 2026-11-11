@@ -28,7 +28,7 @@ system 之后。摘要失败不影响这一轮对话（详见 `summary.py`）。
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -101,6 +101,13 @@ class ChatTurn:
     model: str
     cost_estimate: float
     pending: PendingAction | None = None
+    references: list[dict] = field(default_factory=list)
+    """知识库引用（V1.3）。只在模型这一轮检索命中时非空。
+
+    **不落库**：引用是「这句话出自哪份文件」的即时注解，随响应一起返回就够用。
+    存下来会跟着硬删除的文档一起变成悬空 id —— 文档没了，历史消息底下还挂着
+    一张指向已删文件的引用卡片。真要看历史出处，重新问一遍就行。
+    """
 
 
 def chat(
@@ -242,6 +249,7 @@ def chat(
         model=model,
         cost_estimate=cost,
         pending=flow.pending,
+        references=flow.references,
     )
 
 

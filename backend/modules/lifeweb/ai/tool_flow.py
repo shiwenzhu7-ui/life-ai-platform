@@ -84,6 +84,7 @@ from modules.lifeweb.ai.tools import (
     WRITE_TOOLS,
 )
 from modules.lifeweb.expenses import crud as expenses_crud
+from modules.lifeweb.knowledge import service as knowledge_service
 from modules.lifeweb.tasks import crud as tasks_crud
 from modules.shared.money import money
 
@@ -101,6 +102,10 @@ MAX_ROUNDS = 3
 # 查询结果最多回灌多少字。一条待办约 40 字，5 条也就 200 字；
 # 留 1200 是给「模型什么条件都没给、还查了 10 条」的极端情况兜底。
 _RESULT_MAX_CHARS = 1200
+
+# 知识库检索结果的上限单独放宽。查账的结论文本是模型写的、几十字就够；
+# 检索的结论文本是**原文本身**，5 段 × 300 字 ≈ 1500 字，砍到 1200 会把最后一段拦腰截断
+_SEARCH_RESULT_MAX_CHARS = 2400
 
 # 感知到的状态：用户问「没做完的」时，进行中的也算
 _OPEN_STATUSES = ("todo", "doing")
@@ -143,6 +148,13 @@ class ToolFlow:
     suppressed_titles: tuple[str, ...] = ()
     """被拦下的那一轮里，会话中已经挂着的卡都有哪些「标题」。
     用来判断用户这句是不是在说**另一件事**（见 `_origin_is_new_task`）。"""
+
+    references: list[dict] = field(default_factory=list)
+    """这一轮知识库检索命中的片段，直接回给前端渲染引用卡片。
+
+    与 `reads` 的分工：`reads` 是给日志和测试看的「查了什么」，
+    `references` 是给用户看的「答案出自哪份文件第几页」。只有检索命中了才非空，
+    普通聊天永远是空列表 —— 前端据此决定要不要画引用区。"""
 
     @property
     def error_message(self) -> str | None:
@@ -239,6 +251,20 @@ def run_tool_flow(
                 convo = _nudge_messages(convo)
                 nudged = True
                 continue
+            # 第二个例外：用户明明在问「资料里写了什么」，模型却一个工具都没调。
+            # 它接下来的回答只能来自常识 —— 而用户要的是文件里的内容。
+            # 同样只补问一次，且只在还没查过的时候（见 _SEARCH_HINT）
+            if (
+                not reads
+                and tools is not None
+                and not nudged
+                and rounds < MAX_ROUNDS
+                and _wants_search(origin)
+                and not _claims_write(reply, origin)
+            ):
+                convo = _search_nudge_messages(convo)
+                nudged = True
+                continue
             break
 
         read_calls = [c for c in calls if c.get("name") in READ_ONLY_TOOLS]
@@ -302,7 +328,58 @@ def run_tool_flow(
         rounds=rounds,
         reads=reads,
         nudged=nudged,
+        references=_collect_references(reads),
     )
+
+
+def _collect_references(reads: list[dict]) -> list[dict]:
+    """把检索记录里的片段收成前端要的引用列表。
+
+    按 (document_id, chunk_id) 去重：模型有时会连调两次检索（换个说法再问一遍），
+    同一段原文不该在卡片里出现两次。
+
+    只取前端渲染需要的六个字段 —— 相似度 `score` 也留着：将来做「显示匹配度」
+    或者调试「为什么检索到这段」时不用再改后端。
+    """
+    seen: set[tuple[int, int]] = set()
+    refs: list[dict] = []
+    for record in reads:
+        if record.get("tool") != "search_personal_documents":
+            continue
+        for item in record.get("items") or []:
+            # 检索结果里带的是 search_chunks 的原始键；这里宽进严出，
+            # 少任何一个键就当这条不可用 —— 引用卡片宁可不画，也不能画一张错的
+            try:
+                key = (int(item["document_id"]), int(item["chunk_id"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            refs.append(
+                {
+                    "document_id": item["document_id"],
+                    "chunk_id": item["chunk_id"],
+                    "filename": item["filename"],
+                    "page_no": item.get("page_no"),
+                    "chunk_index": item.get("chunk_index"),
+                    "snippet": _snippet(item.get("content") or ""),
+                    "score": item.get("score"),
+                }
+            )
+    return refs
+
+
+# 引用卡片上显示的原文长度。完整一段有 512 字，卡片里只需要「一句能认出来」的量；
+# 前端想展开看全文可以再调 /knowledge/documents/{id}
+_SNIPPET_CHARS = 120
+
+
+def _snippet(text: str) -> str:
+    flat = " ".join(text.split())
+    if len(flat) <= _SNIPPET_CHARS:
+        return flat
+    return flat[:_SNIPPET_CHARS] + "…"
 
 
 # ---------- 「只说不做」的补救（模块注释第 7 条） ----------
@@ -328,6 +405,16 @@ _NUDGE_HINT = (
     "用户底下一张确认卡片都看不到。现在必须调用工具："
     "create_task=建待办，create_expense=记一笔账，update_task=改待办，delete_task=删待办。"
     "信息不够就先用文字反问，不要假装已经记下来。）"
+)
+
+# 用户明显在问自己的资料、模型却没检索时的补问。与写入补问分开写：
+# 那一句在说「库里的东西你没存」，这一句在说「文件里的东西你没查」，
+# 混用会让模型以为用户要它记账。
+_SEARCH_NUDGE_HINT = (
+    "（系统提示：用户这句是在问他自己上传的资料，但你这一轮没有调用 search_personal_documents，"
+    "你现在的回答只能来自常识，可能完全不是文件里写的内容。"
+    "现在调用 search_personal_documents，用一句完整的话作为 query 检索；"
+    "查不到就如实说文档里没有相关内容。）"
 )
 
 
@@ -384,6 +471,11 @@ def _nudge_messages(
             return nudged
     nudged.append({"role": "user", "content": text})
     return nudged
+
+
+def _search_nudge_messages(convo: list[dict]) -> list[dict]:
+    """检索补问：复用 _nudge_messages，只是换一句话。"""
+    return _nudge_messages(convo, hint=_SEARCH_NUDGE_HINT)
 
 
 def _titles_of(cards: Sequence[Any]) -> tuple[str, ...]:
@@ -702,14 +794,35 @@ def _run_read_tool(
 ) -> dict[str, Any]:
     """执行一次只读查询，返回 `{"count": n, "items": [...], "truncated": bool, ...}`。
 
-    按工具名分流到两个执行器。多一种工具就多一个 `if`，而不是搞一张 dispatch 表 ——
-    两个函数各读各的参数，比一张间接表更容易一眼看出「查询到底做了什么」。
+    按工具名分流到三个执行器。多一种工具就多一个 `if`，而不是搞一张 dispatch 表 ——
+    几个函数各读各的参数，比一张间接表更容易一眼看出「查询到底做了什么」。
     """
     if tool_name == "query_tasks":
         return _run_query_tasks(db, params, user_id)
     if tool_name == "query_expenses":
         return _run_query_expenses(db, params, user_id)
+    if tool_name == "search_personal_documents":
+        return _run_search_documents(db, params, user_id)
     raise ValueError(f"未知的只读工具：{tool_name}")
+
+
+def _run_search_documents(db: Session, params: dict[str, Any], user_id: int) -> dict[str, Any]:
+    """检索知识库。查不到（或知识库整个挂了）就返回空，**不抛异常**。
+
+    调用方拿到空的 count 会照常回灌一句「没检索到」，模型据此说「你的文档里没提到」。
+    让它比「工具报错」好：报错会让模型倾向于跳过检索直接回答，空的则是明确的证据。
+    """
+    query = (params.get("query") or "").strip()
+    if not query:
+        return {"count": 0, "items": [], "truncated": False, "query": ""}
+
+    hits = knowledge_service.search_chunks(db, user_id, query)
+    return {
+        "count": len(hits),
+        "items": hits,
+        "truncated": False,
+        "query": query,
+    }
 
 
 def _run_query_tasks(db: Session, params: dict[str, Any], user_id: int) -> dict[str, Any]:
@@ -910,6 +1023,9 @@ def _fold_messages(
     if unknown:
         lines.append(f"没有名为「{unknown}」的分类，这个条件查不到任何数据。")
 
+    if tool_name == "search_personal_documents":
+        return _fold_search_result(params, payload)
+
     if payload.get("totals"):
         # 合计先于明细说：模型最容易犯的错就是把「返回的这 5 条」当成「全部」
         matched = payload.get("matched") or 0
@@ -935,6 +1051,45 @@ def _fold_messages(
     lines.append("请根据以上真实数据回答用户；数据里没有的不要编造。")
     text = "\n".join(lines)
     return text[:_RESULT_MAX_CHARS]
+
+
+# 每段引文回灌给模型的字数。_SNIPPET_CHARS 是给前端卡片看的（短、能认出来）；
+# 模型要的是能据以回答的原文，给整段 512 字 × 5 段 = 2500 字又太贵，
+# 300 字足够回答绝大多数「文件里怎么写的」。
+_FOLD_CONTENT_CHARS = 300
+
+
+def _fold_search_result(params: dict[str, Any], payload: dict[str, Any]) -> str:
+    """检索结果的回灌文案。单独一个函数是因为**空结果时的话术很关键**。
+
+    查不到时不能只说「结果：0 条」—— 那样模型很可能接着用常识回答，
+    用户看到的是一个像模像样、其实没有出处的答案（RAG 最典型的幻觉）。
+    这里把话说死：没检索到就是没有，要如实告诉用户。
+    """
+    query = payload.get("query") or params.get("query") or ""
+    lines = [f"【系统：已在用户的知识库中检索「{query}」】"]
+
+    if payload["count"] == 0:
+        lines.append(
+            "没有检索到任何相关内容。这说明用户的文档里没有提到这件事，"
+            "或者还没有上传相关的文档。请如实告诉用户「你的文档里没找到相关内容」，"
+            "不要用常识补一个答案，也不要说「根据你的文档」——文档里根本没人写过。"
+        )
+        return "\n".join(lines)
+
+    lines.append(f"检索到 {payload['count']} 段最相关的原文：")
+    for index, item in enumerate(payload["items"], start=1):
+        page = f"第 {item['page_no']} 页 · " if item.get("page_no") else ""
+        content = " ".join((item.get("content") or "").split())[:_FOLD_CONTENT_CHARS]
+        lines.append(f"[{index}] {item.get('filename', '未知文件')}（{page}第 {item['chunk_index']} 段）：{content}")
+
+    lines.append(
+        "请只依据以上原文回答。引用时说明出自哪份文件（有页码就带上页码）；"
+        "原文里没有的内容一律不要补，拿不准就说不确定。"
+    )
+    text = "\n".join(lines)
+    # 检索结果的预算比查账大：原文本身就是要给模型看的，砍到 1200 字就白检索了
+    return text[:_SEARCH_RESULT_MAX_CHARS]
 
 
 def _synthetic_summary(record: dict) -> LLMReply:
@@ -1034,6 +1189,23 @@ def _retry_messages(messages: Sequence[dict], rejection: str | None) -> list[dic
             "请按工具要求的格式重新给出一次；如果确实无法确定，就直接用文字反问用户。）",
         },
     ]
+
+
+def _wants_search(text: str) -> bool:
+    """这句话像不像在问「我上传的文件里写了什么」。
+
+    只看**是否提到知识库**，不看具体问什么 —— 判断「该不该检索」是模型的活，
+    这里只回答「用户是在跟我聊，还是在问文件」。判早了会让闲聊强行检索，判晚了
+    用户白等一句「我不知道」。
+    """
+    return bool(_SEARCH_HINT.search(text or ""))
+
+
+# 用户在提「资料」：文件 / 文档 / 知识库 / 附件，或者直接点名 PDF、笔记、资料。
+# 刻意不收「写」「记」这种动词 —— 它们满嘴都是（「帮我记个待办」），收进来会误伤
+_SEARCH_HINT = re.compile(
+    r"(文件|文档|知识库|附件|资料|PDF|pdf|笔记|截图里|材料|那份|这份)"
+)
 
 
 __all__ = ["MAX_ROUNDS", "ToolFlow", "run_tool_flow", "tools_available"]

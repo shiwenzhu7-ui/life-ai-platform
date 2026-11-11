@@ -539,11 +539,35 @@ class QueryExpensesPayload(BaseModel):
         return self
 
 
+class SearchDocumentsPayload(BaseModel):
+    """search_personal_documents 的参数。只有一句检索词，没有任何筛选项。
+
+    三个字段里只有 query 是寄给 Milvus 的；top_k 故意不给模型 ——
+    返回几条由后端 `settings.kb_top_k` 决定（说明书那边也没开放这个字段）。
+
+    不设 min_length：模型传空串时 query 变成 None，查询层返回空结果，
+    比在这里抛 422 让整轮对话降级要柔和得多。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str | None = Field(default=None, max_length=200)
+
+    @field_validator("query")
+    @classmethod
+    def query_blank_means_none(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+
 # 只读工具名 → 参数模型。与 PAYLOAD_MODELS 分开：这张表里的调用**不产生草稿**，
 # 立刻执行、结果回灌，所以不会走 ACTION_TYPE_BY_TOOL 的翻译。
 READ_PAYLOAD_MODELS: dict[str, type[BaseModel]] = {
     "query_tasks": QueryTasksPayload,
     "query_expenses": QueryExpensesPayload,
+    "search_personal_documents": SearchDocumentsPayload,
 }
 
 

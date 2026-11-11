@@ -455,6 +455,40 @@ DELETE_EXPENSE: dict = {
     },
 }
 
+SEARCH_DOCUMENTS: dict = {
+    "type": "function",
+    "function": {
+        "name": "search_personal_documents",
+        # 四层照旧：干什么 / 何时用 / 何时别用 / 拿不准怎么办。
+        # 这里最要紧的是第一句「只读」和第二句「答案只能来自查到的原文」——
+        # 模型拿到检索结果后最常见的毛病是顺手把常识补进去，
+        # 用户看到的是「文件里写的」，实际上是模型自己编的。
+        "description": (
+            "在用户自己上传的知识库文档里做语义检索，只读，不会修改任何数据。"
+            "用户问到过去上传的文件里才有的内容时调用："
+            "「我那个预算表里房贷多少」「上次那份合同怎么写的」「我笔记里怎么记的」。"
+            "用户只是闲聊、问常识、问待办和账目时不要用这个。"
+            "回答**只能来自检索到的原文**：查不到就如实说「你的文档里没提到这件事」，"
+            "绝不要用常识补一个像样的答案，也不要说「根据文件」而其实没查。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "要检索的内容，写成一句完整的话，例如「每个月房贷多少钱」。"
+                        "不要只丢一个关键词，语义检索按整句的意思找"
+                    ),
+                },
+            },
+            "required": ["query"],
+            # 不给 top_k：返回几条是后端的事，放开给模型只会让它一次要 20 条撑爆上下文
+            "additionalProperties": False,
+        },
+    },
+}
+
 # 顺序固定：以后加工具就往后追加，测试与请求体都依赖这个顺序稳定
 ALL_TOOLS: list[dict] = [
     CREATE_TASK,
@@ -465,10 +499,16 @@ ALL_TOOLS: list[dict] = [
     DELETE_TASK,
     UPDATE_EXPENSE,
     DELETE_EXPENSE,
+    SEARCH_DOCUMENTS,
 ]
 
-# 只读工具名：tool_flow 据此分流 —— 这批立刻执行并回灌，不产生待确认卡片
-READ_ONLY_TOOLS: frozenset[str] = frozenset({"query_tasks", "query_expenses"})
+# 只读工具名：tool_flow 据此分流 —— 这批立刻执行并回灌，不产生待确认卡片。
+# 注意 search_personal_documents 属于**查询**，不是写入：
+# 它的结果直接喂回模型让模型据此说话，中间没有任何东西要用户确认。
+# 归错这一格，用户问「我文件里写了什么」会被弹出一张确认卡。
+READ_ONLY_TOOLS: frozenset[str] = frozenset(
+    {"query_tasks", "query_expenses", "search_personal_documents"}
+)
 
 # 写入工具名：这批产出一张待确认卡片。与 READ_ONLY_TOOLS 互补而不是互相推导 ——
 # 以后加第三个「既不是查询也不出卡」的工具（比如 set_reminder）时不会被误判成写入。

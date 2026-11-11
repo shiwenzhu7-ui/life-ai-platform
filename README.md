@@ -163,21 +163,34 @@ AI 提取结果：
 
 实现要点（V1.3）：PDF / DOCX / TXT，单个文件 ≤20MB，按 `sha256` 去重；正文只存在 MySQL 的 `document_chunks`，Milvus 只存向量与 `user_id` / `document_id` 两个过滤字段；嵌入用本地 `bge-small-zh-v1.5`（fastembed / ONNX，不需要 torch）；检索强制带 `user_id` 过滤，top_k=5。
 
-## 6. LangChain 工具设计
+问答入口在 `POST /ai/chat`：模型看到问题后调用第 9 个工具 `search_personal_documents`，
+服务端把检索到的原文回灌给模型，响应里附带 `references[]`（文档名 / 页码 / 片段 / 相似度）供前端渲染来源卡片。
+引用**不落库**，只存在于当次响应。
+
+> 真机坑：Milvus 上 `insert` 之后 0 秒 `get`/`query`/`search` 会一起返回空，
+> 显式 `consistency_level="Strong"` 也不行，1 秒后才有。`search_chunks` 因此在
+> 首次检索为空时等 0.8 秒再查一次（见 `docs/AI设计.md` §7.4.1）。
+
+## 6. AI 工具设计
 
 > 实际实现**没有引入 LangChain**：工具层是自写的函数 + Pydantic Schema，切分器也是自写的字符切分。
-> 下面的表格保留为设计意图，`add_shopping_item` 与 `generate_life_report` 尚未实现（购物推迟到 V1.4）。
+> V1.1 落地 7 个工具，V1.3 加上 `search_personal_documents` 共 9 个；
+> `add_shopping_item`（随购物推迟到 V1.4）、`query_life_records`、`generate_life_report` 尚未实现。
 
 | 工具 | 用途 | 类型 |
 |---|---|---|
 | `query_tasks` | 查询当前用户待办 | 只读 |
 | `create_task` | 创建待办 | 写入，需确认 |
+| `update_task` | 修改待办 | 写入，需确认 |
+| `delete_task` | 删除待办（硬删） | 写入，需确认 |
 | `query_expenses` | 查询消费数据 | 只读 |
 | `create_expense` | 新增消费记录 | 写入，需确认 |
-| `query_life_records` | 查询生活记录 | 只读 |
-| `add_shopping_item` | 添加购物项目 | 写入，需确认 |
+| `update_expense` | 修改消费记录 | 写入，需确认 |
+| `delete_expense` | 删除消费记录（硬删） | 写入，需确认 |
 | `search_personal_documents` | 检索个人知识库 | 只读 |
-| `generate_life_report` | 生成生活报告 | 生成 |
+| `query_life_records` | 查询生活记录（V1.4） | 只读 |
+| `add_shopping_item` | 添加购物项目（V1.4 推迟） | 写入，需确认 |
+| `generate_life_report` | 生成生活报告（V1.4） | 生成 |
 
 用户 ID 必须由 FastAPI 根据验证后的 Token 注入工具，不能让大模型自行提供用户 ID。
 
@@ -323,10 +336,13 @@ life-ai-platform/
 - 使用本地 `bge-small-zh-v1.5`（fastembed / ONNX）生成向量。
 - ~~通过 `langchain-milvus` 写入~~ → 实际用 `pymilvus` 直接写入集合 `kb_chunks`。
 - 检索时按 `user_id` 过滤（集合里只存 `id` / 向量 / `user_id` / `document_id`）。
-- 回答中展示文档名称和引用片段（含页码）。
+- 回答中展示文档名称和引用片段（含页码）—— 后端已返回 `references`，前端来源卡片待做。
 - 删除文档时同步清理 MySQL（硬删）、文件和 Milvus 数据。
 
 完成标准：用户可以上传资料并基于自己的文档提问，系统能够返回带来源的答案，且不能检索其他用户的数据。
+
+**状态**：后端已完成（4 个 `/knowledge` 接口 + `search_personal_documents` 工具 + `references`），
+前端 `/knowledge` 页面与对话页的来源卡片尚未开工。
 
 ### V1.4 数据分析与完善版
 
@@ -401,6 +417,6 @@ LangChain、JWT、Milvus RAG 和 Keycloak 分别在后续版本加入，不作�
 - [ ] V1.0 基础生活管理版
 - [ ] V1.1 LangChain 智能助手版
 - [ ] V1.2 JWT 用户系统版
-- [ ] V1.3 Milvus RAG 个人知识库版
+- [ ] V1.3 Milvus RAG 个人知识库版（后端 ✅ / 前端 `/knowledge` 页面待做）
 - [ ] V1.4 数据分析与完善版
 - [ ] V2.0 Keycloak SSO 最终版

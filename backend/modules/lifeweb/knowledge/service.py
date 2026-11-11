@@ -18,16 +18,19 @@
    它同时充当 Milvus 的一致性开关：写到一半失败的文档，即使 Milvus 里残留了
    一些向量，也永远不会出现在检索结果里。
 
-删除同样是三处：MySQL 行（软删）、磁盘文件、Milvus 向量。
-前两处同步做完，Milvus 那一步失败只记日志不阻塞 —— 残留的向量同样被
-`status='ready'` 挡在检索之外，可以事后按 document_id 批量清理。
+删除同样是三处：MySQL 行（硬删）、磁盘文件、Milvus 向量。
+前两处同步做完，Milvus 那一步失败只记日志不阻塞 —— 残留的向量没有
+`documents` 行可对应，检索时按 `status='ready'` 与文档存在性两道条件挡掉，
+可以事后按 user_id/document_id 批量清理。
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
+import time
 import uuid
+from typing import Any
 from datetime import datetime
 from pathlib import Path
 
@@ -507,6 +510,180 @@ def list_chunks(db: Session, document_id: int, *, limit: int = 50) -> list[Docum
             .limit(limit)
         )
     )
+
+
+# ---------------------------------------------------------------- 检索：Milvus 那一半
+
+# 写完到可查之间要等多久。**这不是保守估计，是实测出来的数。**
+# 真 Milvus 上 insert 之后立刻 get/query/search，三者一起返回空；等 1 秒才有。
+# 默认一致性 Bounded 只承诺「秒级」可见，不是「同步」可见。
+_FRESH_INSERT_WAIT_S = 0.8
+
+
+def _search_rows(client: Any, vector: list[float], *, user_id: int, limit: int) -> list[dict]:
+    """向 Milvus 要最近邻，返回 `[{"id", "distance", "entity": {...}}]`。
+
+    这里有两道针对「刚写完查不到」的防线，都是真机上踩出来的（内存替身测不出）：
+
+    1. **consistency_level="Strong"**：默认的 Bounded 只承诺「秒级可见」。
+       显式要 Strong，让服务端按时间戳保证读到自己已提交的写入。
+    2. **空结果等一下再问一次**：实测在 v2.6.25 上，insert 之后 0 秒的
+       get / query / search 三者一齐返回空，等 1 秒后都有数据 —— 也就是说
+       段从写入到进内存索引本身就有个短窗口，Strong 也挡不住（它保的是
+       读时间戳，不是「段已建索引」）。所以第一次空了就等 `_FRESH_INSERT_WAIT_S`
+       再问一次：真没数据时多花 0.8 秒，刚写完时正是救回来的那一次。
+
+    为什么不用 search_iterator：它同样受段可见性约束，实测同样返回空，
+    也没有实现 `__iter__`（只能手动 `next()`），多一条 API 差异不划算。
+    """
+    def _run() -> list[dict]:
+        hits = client.search(
+            collection_name=settings.vector_collection,
+            data=[vector],
+            limit=limit,
+            filter=f"user_id == {user_id}",
+            output_fields=["document_id"],
+            consistency_level="Strong",
+        )
+        rows: list[dict] = []
+        for batch in hits:
+            rows.extend(row for row in batch if isinstance(row, dict))
+        return rows
+
+    first = _run()
+    if first:
+        return first
+
+    # 第一次就是空的：可能是真没有，也可能是刚写进去还不知道。等一下再问一次。
+    # 只在「空」的时候多花这一秒 —— 命中了的常见情况零额外延迟
+    time.sleep(_FRESH_INSERT_WAIT_S)
+    return _run()
+
+
+# ---------------------------------------------------------------- 检索
+
+
+def search_chunks(
+    db: Session,
+    user_id: int,
+    query: str,
+    *,
+    top_k: int | None = None,
+) -> list[dict]:
+    """语义检索：把问题嵌入成向量，去 Milvus 找最近的几块，再回 MySQL 取正文。
+
+    返回的每一块形如：
+
+        {"document_id": 7, "chunk_id": 331, "filename": "预算.pdf",
+         "page_no": 3, "chunk_index": 12, "content": "房贷 4200 ...",
+         "score": 0.83}
+
+    三个决定性的点，少一个都会出问题：
+
+    1. **`filter=f"user_id == {user_id}"` 是安全边界，不是性能优化。**
+       Milvus 自己不认「我的文档」这回事，它只会算距离。不带这个过滤，
+       别人的文档片段会顺着相似度混进回答里 —— 这是整条 RAG 链路
+       最容易写漏、又最难在测试里被发现的一行（测试得用两个用户才暴露）。
+
+    2. **正文回 MySQL 取，不从 Milvus 取。** Milvus 里只存 id/vector/user_id/
+       document_id 四个字段，正文本来就不在里面（见 `_write_vectors`）。
+       把正文也塞进 Milvus 看似省一次查询，代价是同一段文字存两份、删改要同步两处。
+
+    3. **只认 `status='ready'` 的文档。** 处理到一半的文档可能只写进了一部分切块，
+       它的向量已经在 Milvus 里了（向量是分批写的），但正文还不全。
+       让它进结果，用户会得到一个半截的答案。
+
+    检索本身出错（Milvus 连不上、模型加载失败）**不抛异常**，返回空列表 ——
+    知识库是「锦上添花」的能力，它挂掉不该让整轮对话失败。
+    """
+    text = (query or "").strip()
+    if not text:
+        return []
+
+    limit = top_k or settings.kb_top_k
+    try:
+        vector = embedding.embed_query(text)
+        client = vectorstore.get_client()
+        if not client.has_collection(settings.vector_collection):
+            return []
+        rows = _search_rows(client, vector, user_id=user_id, limit=limit)
+    except Exception:  # noqa: BLE001 —— 检索不可用时降级成「没检索到」，不阻断对话
+        logger.warning("知识库检索失败：user=%s", user_id, exc_info=True)
+        return []
+
+    if not rows:
+        return []
+
+    scored: list[tuple[int, float]] = []
+    for row in rows:
+        entity = row.get("entity") or {}
+        document_id = entity.get("document_id")
+        if document_id is None:
+            continue
+        scored.append((int(document_id), float(row.get("distance") or 0.0)))
+    if not scored:
+        return []
+
+    # 只放行 ready 的文档；status 一起取回来，省一次查库
+    doc_ids = {doc_id for doc_id, _ in scored}
+    ready_docs = {
+        doc_id
+        for doc_id, in db.execute(
+            select(Document.id).where(
+                Document.id.in_(doc_ids),
+                Document.user_id == user_id,
+                Document.status == "ready",
+            )
+        )
+    }
+    if not ready_docs:
+        return []
+
+    chunk_ids = [int(row.get("id")) for row in rows if row.get("id") is not None]
+    details = db.execute(
+        select(
+            DocumentChunk.id,
+            DocumentChunk.document_id,
+            DocumentChunk.chunk_index,
+            DocumentChunk.page_no,
+            DocumentChunk.content,
+            Document.filename,
+        )
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .where(
+            DocumentChunk.id.in_(chunk_ids),
+            DocumentChunk.document_id.in_(ready_docs),
+            Document.user_id == user_id,
+        )
+    ).all()
+    by_chunk = {row.id: row for row in details}
+
+    # 按 Milvus 给的相似度从高到低走；同一份文档只留最相似的那一块，
+    # 免得一个问题的答案被同一份文件刷屏。跨文档时保留多个来源，
+    # 这正是 RAG 相对「直接塞全文」的价值所在
+    seen_docs: set[int] = set()
+    results: list[dict] = []
+    for doc_id, score in scored:
+        if doc_id not in ready_docs or doc_id in seen_docs:
+            continue
+        for chunk_id in chunk_ids:
+            row = by_chunk.get(chunk_id)
+            if row is None or row.document_id != doc_id:
+                continue
+            seen_docs.add(doc_id)
+            results.append(
+                {
+                    "document_id": row.document_id,
+                    "chunk_id": row.id,
+                    "filename": row.filename,
+                    "page_no": row.page_no,
+                    "chunk_index": row.chunk_index,
+                    "content": row.content,
+                    "score": round(score, 4),
+                }
+            )
+            break
+    return results[:limit]
 
 
 # ---------------------------------------------------------------- 删除
