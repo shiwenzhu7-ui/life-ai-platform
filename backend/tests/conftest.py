@@ -243,7 +243,6 @@ def make_expense(
     occurred_at=None,
     note: str | None = None,
     source: str = "manual",
-    deleted_at=None,
 ):
     """直接写一条收支（不经过接口）。"""
     from modules.lifeweb.expenses.model import Expense
@@ -257,7 +256,6 @@ def make_expense(
         occurred_at=occurred_at,
         note=note,
         source=source,
-        deleted_at=deleted_at,
     )
     db.add(expense)
     db.commit()

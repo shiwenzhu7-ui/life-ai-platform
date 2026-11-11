@@ -258,12 +258,10 @@ def test_other_users_expense_is_404(client, provider, db):
     assert str(_reload(other.id).amount) == "27.50"
 
 
-def test_soft_deleted_expense_is_404(client, provider, db):
-    """已经软删的再改：404，不建一张注定点不动的卡。"""
+def test_deleted_expense_is_404(client, provider, db):
+    """已经删掉的再改：404，不建一张注定点不动的卡。"""
     expense = _make_taxi(db)
-    with new_session() as s:
-        s.get(Expense, expense.id).deleted_at = now_utc()
-        s.commit()
+    client.delete(f"{API}/expenses/{expense.id}")
     provider.queue(_reply(calls=[_call(expense_id=expense.id, amount=30)]))
     provider.queue(_reply(calls=[_call(expense_id=expense.id, amount=30)]))
 
@@ -387,7 +385,7 @@ def test_override_cannot_change_expense_id(client, db):
         {"user_id": 2},
         {"status": "done"},
         {"id": 999},
-        {"deleted_at": None},
+        {"created_at": None},
     ],
 )
 def test_override_rejects_unknown_fields(client, db, override):
@@ -506,9 +504,7 @@ def test_expense_deleted_from_page_before_confirm_is_404(client, db):
     """卡片躺着的时候，用户在账本里把这笔删了：确认时 404，不是静默成功。"""
     expense = _make_taxi(db)
     action = _seed_pending(db, expense.id)
-    with new_session() as s:
-        s.get(Expense, expense.id).deleted_at = now_utc()
-        s.commit()
+    client.delete(f"{API}/expenses/{expense.id}")
 
     res = _confirm(client, action.id)
 

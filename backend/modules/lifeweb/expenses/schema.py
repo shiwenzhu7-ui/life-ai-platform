@@ -66,7 +66,7 @@ class ExpenseCreate(BaseModel):
     刻意**没有**的字段：
       user_id      由登录态决定（core/deps.py），前端传了也不读
       source       manual / ai 由「哪个代码路径写入」决定，不由调用方声明
-      created_at   updated_at   deleted_at   由数据库维护
+      created_at   updated_at              由数据库维护
 
     校验分两层，这里只管字段本身的格式：
       - 金额、长度、个数 → 本类（报 422 + detail.errors 指到具体字段）
@@ -131,8 +131,7 @@ class ExpenseUpdate(BaseModel):
     刻意**没有**的字段：
       id / user_id   身份，改了就是越权
       source         由「哪条代码路径写入」决定，PATCH 能改就等于伪造来源
-      created_at / updated_at / deleted_at   数据库维护；
-                     deleted_at 若可写，就等于绕过 DELETE 接口做软删除
+      created_at / updated_at   数据库维护
     """
 
     type: ExpenseType | None = Field(default=None, description="expense / income")

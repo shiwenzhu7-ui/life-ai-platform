@@ -1,6 +1,6 @@
 """tasks 表（待办）。
 
-字段与数据库**逐列一致**（11 列：10 列 + 后加的 category_id）。
+字段与数据库**逐列一致**（10 列：9 列 + 后加的 category_id）。
 以后要加 remind_at、source 等列，走 Alembic 迁移加列，不在这里预留。
 """
 
@@ -55,8 +55,7 @@ class Task(Base):
         DateTime, server_default=func.now(), nullable=False
     )
 
-    # 软删除：有值表示已删，查询时过滤掉
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 删除是硬删（DELETE），表里没有 deleted_at 列
 
     def is_overdue(self, now_utc: datetime) -> bool:
         """是否逾期：有截止时间、已经过了、且还没完成/取消。

@@ -144,12 +144,12 @@ def test_tasks_get_patch_delete_are_404_for_other(client, two_users):
         assert r.status_code == 404
         assert client.delete(f"{API}/tasks/{task_id}").status_code == 404
 
-    # 原数据一个字都没变：标题还是原名、状态还是 todo、没被软删
+    # 原数据一个字都没变：标题还是原名、状态还是 todo、行还在
     with new_session() as s:
         row = s.get(type(task), task_id)
+        assert row is not None
         assert row.title == "只有我能看"
         assert row.status == "todo"
-        assert row.deleted_at is None
 
 
 def test_task_detail_is_not_shared_when_both_create_same_title(client, two_users):
@@ -192,8 +192,8 @@ def test_expenses_get_patch_delete_are_404_for_other(client, two_users):
 
     with new_session() as s:
         row = s.get(Expense, expense_id)
+        assert row is not None
         assert str(row.amount).startswith("10")
-        assert row.deleted_at is None
 
 
 def test_expenses_summary_only_counts_own(client, two_users):
@@ -323,7 +323,7 @@ def test_ai_session_detail_messages_patch_delete_are_404_for_other(client, two_u
     with new_session() as s:
         row = s.get(ChatSession, session_id)
         assert row.title == "只有我能看"
-        assert row.deleted_at is None
+        assert row.deleted_at is None, "会话是软删，越权删除不能打上标记"
 
 
 def test_ai_chat_isolation(client, two_users, fake_llm):

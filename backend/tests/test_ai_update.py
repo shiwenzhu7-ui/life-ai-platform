@@ -189,13 +189,10 @@ def test_other_users_task_is_404(client, provider, db):
     assert _reload_task(other.id).title == "别人的待办"
 
 
-def test_soft_deleted_task_is_404(client, provider, db):
-    """软删的待办也不能改 —— 用户已经把它扔进回收站了。"""
+def test_deleted_task_is_404(client, provider, db):
+    """删掉的待办也不能改 —— 行已经不在了。"""
     task = make_task(db, title="要删掉的")
-    with new_session() as s:
-        row = s.get(Task, task.id)
-        row.deleted_at = now_utc()  # 软删
-        s.commit()
+    client.delete(f"{API}/tasks/{task.id}")
     provider.queue(_reply(calls=[_call(task_id=task.id, title="改一改")]))
     provider.queue(_reply(calls=[_call(task_id=task.id, title="改一改")]))
 

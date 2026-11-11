@@ -367,10 +367,10 @@ def test_status_rejects_unknown_value(client, db):
     assert res.status_code == 422
 
 
-# ---------- 删除（软删除） ----------
+# ---------- 删除（硬删） ----------
 
 
-def test_delete_returns_204_and_hides_row(client, db):
+def test_delete_returns_204_and_removes_row(client, db):
     task = make_task(db, title="要删的")
 
     res = client.delete(f"{API}/tasks/{task.id}")
@@ -383,9 +383,7 @@ def test_delete_returns_204_and_hides_row(client, db):
     with new_session() as session:
         from modules.lifeweb.tasks.model import Task
 
-        row = session.get(Task, task.id)
-        assert row is not None, "软删除必须保留行"
-        assert row.deleted_at is not None
+        assert session.get(Task, task.id) is None, "硬删除后行必须真的消失"
 
 
 def test_delete_twice_is_404(client, db):
@@ -403,4 +401,4 @@ def test_delete_another_users_task_does_nothing(client, db):
     with new_session() as session:
         from modules.lifeweb.tasks.model import Task
 
-        assert session.get(Task, other.id).deleted_at is None
+        assert session.get(Task, other.id) is not None, "越权删除不能删掉别人的行"

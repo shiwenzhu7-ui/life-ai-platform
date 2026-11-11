@@ -226,9 +226,8 @@ def test_account_filter(client, provider, db):
 def test_other_users_and_deleted_rows_are_invisible(client, provider, db):
     """别人的账、自己删掉的账，一条都不能进合计 —— 否则「一共多少」直接泄露。"""
     make_expense(db, amount="100.00", user_id=2, occurred_at=_at(2026, 11, 2))
-    make_expense(
-        db, amount="200.00", occurred_at=_at(2026, 11, 2), deleted_at=_at(2026, 11, 3)
-    )
+    gone = make_expense(db, amount="200.00", occurred_at=_at(2026, 11, 2))
+    client.delete(f"{API}/expenses/{gone.id}")
     make_expense(db, amount="9.90", occurred_at=_at(2026, 11, 2))
 
     provider.queue(_reply(None, calls=[_call()])).queue(_reply("好的"))

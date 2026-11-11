@@ -1,8 +1,9 @@
 """待办的数据访问层 —— 只写 SQL，不写业务规则。
 
-两条铁律（每个查询都必须满足）：
-  1. 必须带 user_id 过滤 —— 数据隔离的最后一道防线
-  2. 必须排除软删除（deleted_at IS NULL）
+铁律（每个查询都必须满足）：必须带 user_id 过滤 —— 数据隔离的最后一道防线。
+
+删除是**硬删**（DELETE 语句，行真的消失）。tasks 表没有 deleted_at 列，
+所以查询侧不需要「排除已删除」的条件 —— 删掉的行天然查不到。
 
 写操作默认在本层完成 commit：现在都是单表写入，事务边界就在一条语句里。
 
@@ -29,8 +30,8 @@ MAX_SEARCH_LIMIT = 10
 
 
 def _base_query(user_id: int) -> Select:
-    """所有查询的公共起点：限本人 + 未删除。"""
-    return select(Task).where(Task.user_id == user_id, Task.deleted_at.is_(None))
+    """所有查询的公共起点：限本人。"""
+    return select(Task).where(Task.user_id == user_id)
 
 
 # 优先级没有天然大小：数据库里是枚举，按字母排会是 high < low < medium（毫无意义）。
@@ -313,21 +314,22 @@ def change_status(db: Session, task: Task, status: str) -> Task:
     return task
 
 
-def soft_delete(db: Session, task: Task, *, commit: bool = True) -> None:
-    """软删除 —— 只写 deleted_at，不执行 DELETE 语句。
+def delete(db: Session, task: Task, *, commit: bool = True) -> None:
+    """硬删除 —— 执行 DELETE，那一行从表里消失。
 
-    为什么不真删（三条理由都跟「以后还要查」有关）：
-      1. 真删之后「本月删了几条」这类统计就没有数据可算
-      2. 记录无痕消失，出了问题没法复现
-      3. 误删无法恢复
+    为什么是硬删：用户要的是「删干净」。软删会让全表每一处查询都记得补
+    `deleted_at IS NULL`，忘一处就是把删掉的数据算进统计里；硬删把这件事
+    变成数据库保证的，不靠人记。
 
     `commit=False` 是给 AI 确认卡用的：删除必须和「卡片置 confirmed」同一个事务，
     否则会出现「待办删了、卡片还挂在 pending」这种对不上账的状态。
-    默认 True 保持原行为，页面上的 DELETE 接口一行都不用改。
+    默认 True，页面上的 DELETE 接口一行都不用改。
 
-    不返回 Task：接口回 204，没有响应体。
-    调用方（router）已经用它查过一次，那条记录在本次事务里是活的。
+    不 flush 也不返回：接口回 204，没有响应体；DB 的删除在事务提交时生效。
+
+    调用方（router / ai.execute）已经先查过一次这条记录 —— 查不到就走 404，
+    所以走到这里时它一定存在。
     """
-    task.deleted_at = now_utc()
+    db.delete(task)
     if commit:
         db.commit()

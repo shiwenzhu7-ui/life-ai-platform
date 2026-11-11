@@ -420,14 +420,23 @@ UPDATE ai_pending_actions
 ### 7.6 删除一致性
 
 ```text
-DELETE /documents/{id}
-  1. documents.deleted_at = now（软删，立即不可检索）
-  2. 建 async_tasks(task_type='cleanup') 清理任务
-  3. 任务：Milvus delete(expr="document_id == X") → 物理删 document_chunks → 删本地文件
-  4. 失败重试 3 次，仍失败记 `async_tasks.error` 并通知管理员（`operation_logs` 本期不做）
+DELETE /documents/{id}                                    （V1.3 实际实现）
+  1. DELETE FROM documents WHERE id = X                   （硬删，行立即消失，列表和检索都看不到）
+  2. 同请求内同步：DELETE FROM document_chunks WHERE document_id = X
+  3. Milvus delete(filter="document_id == X")             （尽力而为，失败只记 warning）
+  4. 删本地文件 uploads/{user_id}/{uuid}.ext               （失败只记 warning）
 ```
 
-先软删再异步清理，保证「用户点击删除后立刻检索不到」，同时避免阻塞请求。
+V1.3 是**同步三处清理**，没有引入 `async_tasks` 补偿任务：
+
+- 一次上传的切块数通常在几十到几百之间，两条 DELETE + 一次 Milvus 删除是毫秒级，
+  让用户等几百毫秒换「点完就是干净」，比立刻回 204 再去等补偿任务更符合预期。
+- 残留向量的兜底是 `status='ready'` 这个检索前置条件：documents 行已删，
+  即使 Milvus 里还留着向量，检索端也用不到它们（「安全垃圾」）。
+- 设计里的异步补偿（`async_tasks(task_type='cleanup')` + 失败重试 3 次）留给
+  「删除量变大 / 需要离线重建」时再做，接口签名不变。
+
+> 会话（`chat_sessions`）仍是软删 —— 那一张表的删除语义没有改。
 
 ---
 

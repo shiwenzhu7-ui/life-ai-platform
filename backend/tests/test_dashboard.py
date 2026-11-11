@@ -133,7 +133,7 @@ def test_overview_ignores_other_users_data(client, db):
     assert body["focus_tasks"] == []
 
 
-def test_overview_ignores_soft_deleted_rows(client, db):
+def test_overview_ignores_deleted_rows(client, db):
     task = make_task(db, title="删掉的逾期", due_at=beijing(-2))
     client.delete(f"{API}/tasks/{task.id}")
 

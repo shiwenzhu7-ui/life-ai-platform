@@ -1,8 +1,9 @@
 """消费的数据访问层 —— 只写 SQL，不写业务规则。
 
-两条铁律与待办模块完全一致：
-  1. 必须带 user_id 过滤 —— 数据隔离的最后一道防线
-  2. 必须排除软删除（deleted_at IS NULL）
+铁律与待办模块完全一致：必须带 user_id 过滤 —— 数据隔离的最后一道防线。
+
+删除是**硬删**（DELETE 语句，行真的消失）。expenses 表没有 deleted_at 列，
+所以查询侧不需要「排除已删除」的条件 —— 删掉的行天然查不到。
 
 排序与待办不同：待办按「到期时间升序」（越早越急），
 消费按「发生时间**倒序**」（最近记的在上）——
@@ -27,8 +28,8 @@ DEFAULT_SEARCH_LIMIT = 5
 
 
 def _base_query(user_id: int) -> Select:
-    """所有查询的公共起点：限本人 + 未删除。"""
-    return select(Expense).where(Expense.user_id == user_id, Expense.deleted_at.is_(None))
+    """所有查询的公共起点：限本人。"""
+    return select(Expense).where(Expense.user_id == user_id)
 
 
 def list_for_user(
@@ -100,10 +101,9 @@ def list_for_user(
 def get_for_user(db: Session, user_id: int, expense_id: int) -> Expense | None:
     """取一笔账；取不到返回 None，由 router 决定怎么回（这里不抛 HTTP 异常）。
 
-    复用 _base_query 是关键，它自带两个条件：
-      - user_id == 当前用户：别人的记录查不到 → router 回 404（不是 403，
-        403 等于告诉对方「这条数据存在，只是你没权限」，能被用来探测别人有多少条）
-      - deleted_at IS NULL：已软删的记录查不到 → 也是 404
+    复用 _base_query 是关键，它自带 user_id == 当前用户：别人的记录查不到 →
+    router 回 404（不是 403，403 等于告诉对方「这条数据存在，只是你没权限」，
+    能被用来探测别人有多少条）。删掉的行表里没有，自然也查不到。
     """
     return db.scalars(_base_query(user_id).where(Expense.id == expense_id)).first()
 
@@ -187,21 +187,20 @@ def update(
     return expense
 
 
-def soft_delete(db: Session, expense: Expense, *, commit: bool = True) -> None:
-    """软删除：只把 deleted_at 打上时间戳，那一行仍留在表里。
+def delete(db: Session, expense: Expense, *, commit: bool = True) -> None:
+    """硬删除：执行 DELETE，那一行从表里消失。
 
-    只写一列，不碰 amount / type / 其它字段 —— 用户点「删除」的意思是
-    「这条不该再出现」，不是「把金额改成 0」。
+    用户点「删除」的意思是「这笔不该再出现」，不是「把金额改成 0」——
+    软删会让每一处查询都必须记得补条件，硬删交给数据库保证。
 
     故意不 refresh：调用方（DELETE 接口）返回 204 无响应体，
     没有人读这个对象的新状态，多一次 SELECT 是白花。
 
-    为什么不用物理删：删错了无法恢复；也统计不出「这个月删了几条」。
-    代价是表会慢慢变大 —— 以后加一个「deleted_at 超过 90 天就物理删」的清理任务。
+    `commit=False` 是给 AI 确认卡用的：删除与「卡片置 confirmed」同事务，
+    由 pending.confirm_action 统一提交。
     """
-    expense.deleted_at = now_utc()
+    db.delete(expense)
     if not commit:
-        # AI 确认卡：软删与「卡片置 confirmed」同事务，由 pending.confirm_action 统一提交
         db.flush()
         return
     db.commit()
@@ -227,7 +226,7 @@ def search(
 
     返回的金额都是两位小数的字符串（走 `money()`），与页面口径一致。
     """
-    conds: list = [Expense.user_id == user_id, Expense.deleted_at.is_(None)]
+    conds: list = [Expense.user_id == user_id]
 
     # 与 list_for_user 同一套半开区间：date_from 当天 00:00(北京) ≤ occurred_at
     # < date_to 次日 00:00(北京)，所以「11 月 1 日到 11 月 30 日」包含两端整天
@@ -283,7 +282,7 @@ def daily_totals(db: Session, user_id: int, days: list[date]) -> list[dict]:
       `GET /expenses/summary` 的 recent_7d
       `GET /dashboard/overview` 的 recent_7d（首页迷你柱状图）
 
-    抽出来的收益不是少几行，而是**口径只有一处**：只算支出、只算未删、
+    抽出来的收益不是少几行，而是**口径只有一处**：只算支出、
     按北京日期切日、缺的补零。任何一条各写一遍都会慢慢分叉。
 
     days 必须是**升序且连续**的日期（调用方负责）：这里只取两头
@@ -300,7 +299,6 @@ def daily_totals(db: Session, user_id: int, days: list[date]) -> list[dict]:
         select(local_day, func.sum(Expense.amount))
         .where(
             Expense.user_id == user_id,
-            Expense.deleted_at.is_(None),
             Expense.type == "expense",
             Expense.occurred_at >= beijing_day_start_utc(days[0]),
             Expense.occurred_at < beijing_day_start_utc(days[-1] + timedelta(days=1)),
@@ -330,14 +328,13 @@ def summarize(
     聚合查询的结果本来就不是某张表的行，套不回 Expense。
     分类名要查 categories 表，由 router 用 name_map 补上（本层不跨模块查表）。
 
-    三个查询都必须自己带 user_id 与 deleted_at IS NULL：这里没法复用
+    三个查询都必须自己带 user_id：这里没法复用
     _base_query —— 它返回的是 Expense 实体查询，而这里要的是「按 type 分组」的聚合列。
-    忘了 deleted_at 那一行，用户删掉的账会继续被算进总额。
+    忘了那一行，别人的账会被算进总额。
     """
     # 当月的公共条件：区间是半开的，见 core/time.py 的 beijing_month_range
     month_conds = [
         Expense.user_id == user_id,
-        Expense.deleted_at.is_(None),
         Expense.occurred_at >= month_start_utc,
         Expense.occurred_at < month_end_utc,
     ]

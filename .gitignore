@@ -64,3 +64,5 @@ tmp/
 temp/
 dsh-acl-recovery/
 .tmp/
+pytest_*.xml
+junit*.xml

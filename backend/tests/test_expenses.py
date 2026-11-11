@@ -162,7 +162,7 @@ def test_list_expenses_rejects_reversed_range(client):
     assert res.json()["message"] == "date_from 不能晚于 date_to"
 
 
-def test_list_expenses_hides_soft_deleted(client, db):
+def test_list_expenses_hides_deleted(client, db):
     row = make_expense(db, amount="10.00", occurred_at=utc(2026, 11, 1))
     client.delete(f"{API}/expenses/{row.id}")
 
@@ -254,7 +254,7 @@ def test_patch_type_and_category_together_succeeds(client, db):
 # ---------- 删一笔 ----------
 
 
-def test_delete_expense_is_soft(client, db):
+def test_delete_expense_really_removes_row(client, db):
     row = make_expense(db, occurred_at=utc(2026, 11, 1))
 
     res = client.delete(f"{API}/expenses/{row.id}")
@@ -265,8 +265,7 @@ def test_delete_expense_is_soft(client, db):
     with new_session() as session:
         from modules.lifeweb.expenses.model import Expense
 
-        kept = session.get(Expense, row.id)
-        assert kept is not None and kept.deleted_at is not None
+        assert session.get(Expense, row.id) is None, "硬删除后行必须真的消失"
 
 
 # ---------- 月度汇总 ----------
@@ -323,7 +322,7 @@ def test_summary_rejects_bad_month(client, month):
     assert res.json()["message"] == "month 格式应为 YYYY-MM"
 
 
-def test_summary_excludes_soft_deleted(client, db):
+def test_summary_excludes_deleted(client, db):
     row = make_expense(db, amount="99.00", occurred_at=utc(2026, 11, 2))
     client.delete(f"{API}/expenses/{row.id}")
 

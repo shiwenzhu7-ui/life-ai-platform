@@ -193,13 +193,13 @@ def delete_task(
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ) -> None:
-    """软删除（只写 deleted_at，不真删）。
+    """删除待办（硬删，行真的从表里消失）。
 
     三条行为都需要保证：
-      1. 删完再查详情 → 404（_base_query 排除了 deleted_at 有值的行）
+      1. 删完再查详情 → 404
       2. 连删两次 → 第二次也是 404，不是 500（第二次根本查不到这条）
       3. 删别人的 → 404，不泄露「这条存在」
 
     返回 204 无响应体：前端拿到后直接把那一行从列表里移除，不需要新数据。
     """
-    crud.soft_delete(db, _get_or_404(db, user_id, task_id))
+    crud.delete(db, _get_or_404(db, user_id, task_id))

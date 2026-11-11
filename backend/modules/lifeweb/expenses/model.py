@@ -91,8 +91,7 @@ class Expense(Base):
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
-    # 软删除：有值表示已删
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 删除是硬删（DELETE），表里没有 deleted_at 列
 
     def __repr__(self) -> str:  # pragma: no cover
         return (

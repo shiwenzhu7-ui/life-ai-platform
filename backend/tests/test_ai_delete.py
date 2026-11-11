@@ -6,8 +6,8 @@
 1. 出卡那一刻不能删：用户还没看见卡片，业务表一个字都不许动
 2. 卡片上必须带着**要删的那条待办长什么样**（`gone` 快照）——
    否则「删买菜」这张卡和「删交房租」长得一样，用户没有判断依据
-3. 模型编 id / 抄到别人的 id / 抄到已软删的 —— 一律 404，不落卡片
-4. 用户确认后：只软删那一条，`deleted_at` 有值、行还在（不是 DELETE）
+3. 模型编 id / 抄到别人的 id / 抄到已删的 —— 一律 404，不落卡片
+4. 用户确认后：只硬删那一条，行真的从表里消失（DELETE）
 5. 重复确认、过期、取消，一次都不能多删
 6. override 里塞别的字段（换个 id 删、改成删会话）一律挡下
 
@@ -70,9 +70,9 @@ def _reload_task(task_id: int) -> Task:
 
 
 def _is_deleted(task_id: int) -> bool:
-    """用新会话查，绕开 REPEATABLE READ 的旧快照。"""
+    """硬删语义：行不存在即已删除。用新会话查，绕开旧快照。"""
     with new_session() as s:
-        return s.get(Task, task_id).deleted_at is not None
+        return s.get(Task, task_id) is None
 
 
 def _pending_count() -> int:
@@ -187,12 +187,10 @@ def test_other_users_task_is_404(client, provider, db):
     assert not _is_deleted(other.id)
 
 
-def test_soft_deleted_task_is_404(client, provider, db):
-    """已经软删的再删一次：404，不建一张注定点不动的卡。"""
+def test_deleted_task_is_404(client, provider, db):
+    """已经删掉的再删一次：404，不建一张注定点不动的卡。"""
     task = make_task(db, title="早删过了")
-    with new_session() as s:
-        s.get(Task, task.id).deleted_at = now_utc()
-        s.commit()
+    client.delete(f"{API}/tasks/{task.id}")
     provider.queue(_reply(calls=[_call(task_id=task.id)]))
     provider.queue(_reply(calls=[_call(task_id=task.id)]))
 
@@ -211,10 +209,10 @@ def test_missing_task_id_is_rejected(client, provider, db):
     assert _pending_count() == 0
 
 
-# ---------- 确认：软删，只删那一条 ----------
+# ---------- 确认：硬删，只删那一条 ----------
 
 
-def test_confirm_soft_deletes_exactly_one_row(client, db):
+def test_confirm_deletes_exactly_one_row(client, db):
     task = make_task(db, title="买菜")
     keep = make_task(db, title="交房租")
     action = _seed_pending(db, task.id)
@@ -226,10 +224,10 @@ def test_confirm_soft_deletes_exactly_one_row(client, db):
     assert body["status"] == "confirmed"
     assert body["created"] == {"type": "task", "id": task.id}
 
-    assert _is_deleted(task.id), "确认之后这条待办应当被软删"
+    assert _is_deleted(task.id), "确认之后这条待办应当被删掉"
     assert not _is_deleted(keep.id), "别的待办一条都不能动"
-    # 软删不是真删：行还在，只是 deleted_at 有值
-    assert _reload_task(task.id) is not None
+    # 硬删：行真的不在了，不是打标记
+    assert _reload_task(task.id) is None
 
 
 def test_confirm_without_body_works(client, db):
@@ -359,9 +357,7 @@ def test_task_deleted_from_page_before_confirm_is_404(client, db):
     """卡片躺在屏幕上的时候，用户在页面上把这条删了：确认时 404，不是静默成功。"""
     task = make_task(db, title="买菜")
     action = _seed_pending(db, task.id)
-    with new_session() as s:
-        s.get(Task, task.id).deleted_at = now_utc()
-        s.commit()
+    client.delete(f"{API}/tasks/{task.id}")
 
     res = _confirm(client, action.id)
 

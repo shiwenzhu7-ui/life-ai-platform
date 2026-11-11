@@ -5,8 +5,8 @@
 
 1. 卡片上必须带着要删的那一笔的样子（`gone` 快照），否则「删那笔打车费」
    和「删那笔午饭」在卡上长得一样
-2. 模型编 id / 别人的 id / 已软删的 —— 一律 404，不落卡片
-3. 用户确认后：只软删那一笔，`deleted_at` 有值、行还在，金额不动
+2. 模型编 id / 别人的 id / 已删的 —— 一律 404，不落卡片
+3. 用户确认后：只硬删那一笔，行真的消失（DELETE），别的账一分不动
 4. 删除卡不接受 override（和删待办一样）：这张卡没有「改成什么」可言
 5. 重复确认 / 过期 / 取消，一次都不能多删
 
@@ -69,8 +69,8 @@ def _reload(expense_id: int) -> Expense | None:
 
 
 def _is_deleted(expense_id: int) -> bool:
-    """用新会话查，绕开 REPEATABLE READ 的旧快照。"""
-    return _reload(expense_id).deleted_at is not None
+    """硬删语义：行不存在即已删除。用新会话查，绕开旧快照。"""
+    return _reload(expense_id) is None
 
 
 def _pending_count() -> int:
@@ -195,12 +195,10 @@ def test_other_users_expense_is_404(client, provider, db):
     assert not _is_deleted(other.id)
 
 
-def test_soft_deleted_expense_is_404(client, provider, db):
-    """已经软删的再删一次：404，不建一张注定点不动的卡。"""
+def test_deleted_expense_is_404(client, provider, db):
+    """已经删掉的再删一次：404，不建一张注定点不动的卡。"""
     expense = _make_taxi(db)
-    with new_session() as s:
-        s.get(Expense, expense.id).deleted_at = now_utc()
-        s.commit()
+    client.delete(f"{API}/expenses/{expense.id}")
     provider.queue(_reply(calls=[_call(expense_id=expense.id)]))
     provider.queue(_reply(calls=[_call(expense_id=expense.id)]))
 
@@ -219,10 +217,10 @@ def test_missing_expense_id_is_rejected(client, provider, db):
     assert _pending_count() == 0
 
 
-# ---------- 确认：软删，只删那一条 ----------
+# ---------- 确认：硬删，只删那一条 ----------
 
 
-def test_confirm_soft_deletes_exactly_one_row(client, db):
+def test_confirm_deletes_exactly_one_row(client, db):
     expense = _make_taxi(db)
     keep = _make_taxi(db, note="另一笔")
     action = _seed_pending(db, expense.id)
@@ -235,12 +233,10 @@ def test_confirm_soft_deletes_exactly_one_row(client, db):
     assert body["created"] == {"type": "expense", "id": expense.id}
     assert body["created_id"] == expense.id
 
-    assert _is_deleted(expense.id), "确认之后这笔账应当被软删"
+    assert _is_deleted(expense.id), "确认之后这笔账应当被删掉"
     assert not _is_deleted(keep.id), "别的账一条都不能动"
-    # 软删不是真删：行还在、金额不动
-    row = _reload(expense.id)
-    assert row is not None
-    assert str(row.amount) == "27.50"
+    # 硬删：行真的不在了
+    assert _reload(expense.id) is None
 
 
 def test_confirm_without_body_works(client, db):
@@ -281,7 +277,7 @@ def test_prepare_payload_keeps_only_expense_id_and_reason(client, db):
         {"amount": "1.00"},  # 删除卡没有「改成什么」
         {"note": "随便"},
         {"user_id": 2},
-        {"deleted_at": None},
+        {"created_at": None},
         {},  # 空字典也算「想改内容」？不算 —— 见下面一条断言
     ],
 )
@@ -381,9 +377,7 @@ def test_expense_deleted_from_page_before_confirm_is_404(client, db):
     """卡片躺着的时候，用户在账本里把这笔删了：确认时 404，不是静默成功。"""
     expense = _make_taxi(db)
     action = _seed_pending(db, expense.id)
-    with new_session() as s:
-        s.get(Expense, expense.id).deleted_at = now_utc()
-        s.commit()
+    client.delete(f"{API}/expenses/{expense.id}")
 
     res = _confirm(client, action.id)
 

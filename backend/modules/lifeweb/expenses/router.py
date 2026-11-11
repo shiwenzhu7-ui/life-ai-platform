@@ -260,7 +260,7 @@ def delete_expense(
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ) -> None:
-    """软删除一笔账。
+    """删除一笔账（硬删，行真的从表里消失）。
 
     两个 204 必须同时满足的细节（少一个，运行到请求时才报
     "Status code 204 must not have a body"）：
@@ -268,7 +268,7 @@ def delete_expense(
       2. **不写 response_model**，且返回类型标注 None、真的不 return 任何东西
 
     第二次删同一条会自然 404：_get_or_404 走 crud.get_for_user，
-    而它的查询基座自带 deleted_at IS NULL —— 第一次删完就查不到了。
+    第一次删完行就没了，查不到。
     """
     expense = _get_or_404(db, user_id, expense_id)
-    crud.soft_delete(db, expense)
+    crud.delete(db, expense)

@@ -8,7 +8,7 @@
 3. 不能复用 tasks/expenses 的 `_base_query`：那个返回的是**实体查询**，
    这里要的是聚合列。所以自己定义了 `_task_scope` / `_expense_scope`，
    所有 SQL 都从它们出发 —— 代价是过滤条件要再写一遍，
-   收益是「忘了 user_id 或 deleted_at」这件事只可能在这两个函数里发生。
+   收益是「忘了 user_id」这件事只可能在这两个函数里发生。
 
 时间口径（全部按北京时间理解、用半开区间）：
   今天   [今天 00:00, 明天 00:00)
@@ -58,13 +58,16 @@ FOCUS_LIMIT = FOCUS_OVERDUE_LIMIT + FOCUS_TODAY_LIMIT
 
 
 def _task_scope(user_id: int) -> list[ColumnElement]:
-    """tasks 的两条硬条件：限本人 + 未软删。所有 tasks 查询都从这里出发。"""
-    return [Task.user_id == user_id, Task.deleted_at.is_(None)]
+    """tasks 的硬条件：限本人。所有 tasks 查询都从这里出发。
+
+    tasks 是硬删的（没有 deleted_at 列），所以这里只有一条条件。
+    """
+    return [Task.user_id == user_id]
 
 
 def _expense_scope(user_id: int) -> list[ColumnElement]:
-    """expenses 的两条硬条件：限本人 + 未软删。"""
-    return [Expense.user_id == user_id, Expense.deleted_at.is_(None)]
+    """expenses 的硬条件：限本人。"""
+    return [Expense.user_id == user_id]
 
 
 def _task_counts(

@@ -67,8 +67,8 @@ LifeAI 希望将这些功能整合到一个平台中，让用户可以直接通�
 | 角色 | 说明 | 主要权限 |
 |---|---|---|
 | `user` | 普通用户 | 管理个人生活数据，使用基础 AI 与知识库功能 |
-| `vip` | 高级用户 | 使用高级模型、更高调用额度和更大知识库空间 |
-| `admin` | 管理员 | 管理用户、角色、配置、日志和公共知识内容 |
+| `vip` | 高级用户 | 使用高级模型、更大知识库空间（**AI 每日调用额度已于 2026-11-10 取消，所有人无限次**） |
+| `admin` | 管理员 | 管理用户与配置（审计日志 2026-11-10 取消，公共知识不做） |
 
 所有个人数据必须按用户隔离。一个用户不能查询或修改其他用户的待办、消费记录和知识文档。
 
@@ -161,7 +161,12 @@ AI 提取结果：
 
 用户可以上传 PDF、DOCX、TXT、菜谱、健身资料、家电说明书和个人生活笔记。系统对文档进行解析、切分、向量化和检索。回答问题时应显示文档名称或引用片段，并确保用户只能检索自己的资料。
 
+实现要点（V1.3）：PDF / DOCX / TXT，单个文件 ≤20MB，按 `sha256` 去重；正文只存在 MySQL 的 `document_chunks`，Milvus 只存向量与 `user_id` / `document_id` 两个过滤字段；嵌入用本地 `bge-small-zh-v1.5`（fastembed / ONNX，不需要 torch）；检索强制带 `user_id` 过滤，top_k=5。
+
 ## 6. LangChain 工具设计
+
+> 实际实现**没有引入 LangChain**：工具层是自写的函数 + Pydantic Schema，切分器也是自写的字符切分。
+> 下面的表格保留为设计意图，`add_shopping_item` 与 `generate_life_report` 尚未实现（购物推迟到 V1.4）。
 
 | 工具 | 用途 | 类型 |
 |---|---|---|
@@ -225,11 +230,17 @@ sleep_records        睡眠记录
 mood_records         心情记录
 diaries              生活日记
 documents            知识库文档
-document_chunks      文档分块
+document_chunks      文档分块（正文唯一副本）
+async_tasks          后台任务记账
 chat_sessions        AI 会话
 chat_messages        AI 消息
+ai_pending_actions   AI 待确认动作
+ai_usage_logs        AI 调用计量（仅成本统计，不限流）
 operation_logs       操作日志（本期不建）
 ```
+
+> 删除语义：`tasks` / `expenses` / `documents` 为**硬删除**，`chat_sessions` 为软删除（`deleted_at`）。
+> 详见 `docs/数据库设计.md` §2.1。
 
 ## 10. 项目目录
 
@@ -308,12 +319,12 @@ life-ai-platform/
 - 支持上传 PDF、DOCX 和 TXT。
 - 保存文档信息和处理状态到 MySQL。
 - 保存原始文件到本地目录，后期可升级 MinIO。
-- 使用 LangChain 解析、清洗和切分文本。
-- 使用 Embedding 模型生成向量。
-- 通过 `langchain-milvus` 将向量写入 Milvus。
-- 检索时使用用户 ID 和文档 ID 过滤。
-- 回答中展示文档名称和引用片段。
-- 删除文档时同步清理 MySQL、文件和 Milvus 数据。
+- ~~使用 LangChain 解析、清洗和切分文本~~ → 实际用 `pypdf` / `python-docx` / 自写字符切分（512 字符 / 64 重叠）。
+- 使用本地 `bge-small-zh-v1.5`（fastembed / ONNX）生成向量。
+- ~~通过 `langchain-milvus` 写入~~ → 实际用 `pymilvus` 直接写入集合 `kb_chunks`。
+- 检索时按 `user_id` 过滤（集合里只存 `id` / 向量 / `user_id` / `document_id`）。
+- 回答中展示文档名称和引用片段（含页码）。
+- 删除文档时同步清理 MySQL（硬删）、文件和 Milvus 数据。
 
 完成标准：用户可以上传资料并基于自己的文档提问，系统能够返回带来源的答案，且不能检索其他用户的数据。
 

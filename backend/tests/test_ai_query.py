@@ -137,11 +137,10 @@ def test_query_only_sees_own_tasks(client, provider, db):
     assert "别人的私事" not in fed
 
 
-def test_query_skips_soft_deleted(client, provider, db):
-    """软删的待办不能复活在 AI 的嘴里。"""
+def test_query_skips_deleted(client, provider, db):
+    """删掉的待办不能复活在 AI 的嘴里。"""
     gone = make_task(db, title="删掉的垃圾")
-    gone.deleted_at = datetime.utcnow()
-    db.commit()
+    client.delete(f"{API}/tasks/{gone.id}")
     make_task(db, title="还活着")
     provider.queue(_reply(calls=[_call()])).queue(_reply("嗯"))
 
