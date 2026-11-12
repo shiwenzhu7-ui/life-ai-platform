@@ -19,6 +19,7 @@ from modules.lifeweb.ai.router import routers as ai_routers
 from modules.lifeweb.dashboard.router import router as dashboard_router
 from modules.lifeweb.expenses.router import router as expenses_router
 from modules.lifeweb.knowledge.router import router as knowledge_router
+from modules.lifeweb.shopping.router import routers as shopping_routers
 from modules.lifeweb.tasks.router import router as tasks_router
 from modules.shared.categories.router import router as categories_router
 
@@ -42,3 +43,7 @@ for ai_router in ai_routers:
 
 # ---------- 知识库（V1.3：上传 / 列表 / 详情 / 删除） ----------
 router.include_router(knowledge_router)
+
+# ---------- 购物（V1.4：清单 + 明细的 11 个接口） ----------
+for shopping_router in shopping_routers:
+    router.include_router(shopping_router)
