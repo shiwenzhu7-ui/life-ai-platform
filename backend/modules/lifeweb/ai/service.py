@@ -70,6 +70,10 @@ FALLBACK_REPLY_EXPENSE = "我整理了一笔账，请你确认。"
 # A12 起改账/删账也用它（两句话都不提「待办」，账目场景同样成立）。
 FALLBACK_REPLY_DELETE = "我整理了一条删除，请你确认。"
 
+# 购物类草稿的兜底正文。不能复用「待办」那句：用户说「帮我买牛奶鸡蛋」，
+# 气泡里写「一条待办」，会让人以为 AI 记错地方了。
+FALLBACK_REPLY_SHOPPING = "我整理了一份购物清单，请你确认。"
+
 # 工具参数始终不合格时返回的正文与错误码
 MALFORMED_REASON = "模型给出的工具参数不合格，这一轮没有生成待确认卡片，请再试一次。"
 
@@ -350,6 +354,7 @@ _FALLBACK_BY_TOOL: dict[str, str] = {
     "delete_task": FALLBACK_REPLY_DELETE,
     "update_expense": FALLBACK_REPLY_UPDATE,
     "delete_expense": FALLBACK_REPLY_DELETE,
+    "add_shopping_item": FALLBACK_REPLY_SHOPPING,
 }
 
 # 草稿的 action_type 与工具名现在同名，但这是两套命名空间：
@@ -360,6 +365,7 @@ _TOOL_BY_ACTION: dict[str, str] = {
     "delete_task": "delete_task",
     "update_expense": "update_expense",
     "delete_expense": "delete_expense",
+    "add_shopping_item": "add_shopping_item",
 }
 
 

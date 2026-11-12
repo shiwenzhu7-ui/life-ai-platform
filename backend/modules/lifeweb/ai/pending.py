@@ -44,6 +44,7 @@ from core.time import BEIJING, now_beijing, now_utc, to_beijing_iso, to_utc_naiv
 from modules.lifeweb.ai.action_schema import (
     UPDATABLE_EXPENSE_FIELDS,
     UPDATABLE_TASK_FIELDS,
+    AddShoppingItemPayload,
     CreateExpensePayload,
     CreateTaskPayload,
     DeleteExpensePayload,
@@ -55,6 +56,8 @@ from modules.lifeweb.ai.action_schema import (
 from modules.lifeweb.ai.models import ChatSession, PendingAction
 from modules.lifeweb.expenses import crud as expenses_crud
 from modules.lifeweb.expenses.model import Expense
+from modules.lifeweb.shopping import crud as shopping_crud
+from modules.lifeweb.shopping.schema import DEFAULT_LIST_NAME, DEFAULT_UNIT
 from modules.lifeweb.tasks import crud as tasks_crud
 from modules.shared.categories.model import Category
 
@@ -197,6 +200,9 @@ _SCOPE_BY_ACTION: dict[str, str] = {
     "update_expense": "expense",
     # 删除账目同样不需要分类，但同样要有这一行
     "delete_expense": "expense",
+    # 加购物物品也不查分类：卡片上只摆「物品 × 数量」，不落 category_id。
+    # 少了这一行会走到 resolve_category_id 的「未知动作」分支，只记 warning 收场
+    "add_shopping_item": "shopping",
 }
 
 # 动作类型 → 能写进业务表的东西。现在只有一个字段：
@@ -209,6 +215,7 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
     "delete_task": {"entity": "task", "parse_payload": DeleteTaskPayload},
     "update_expense": {"entity": "expense", "parse_payload": UpdateExpensePayload},
     "delete_expense": {"entity": "expense", "parse_payload": DeleteExpensePayload},
+    "add_shopping_item": {"entity": "shopping", "parse_payload": AddShoppingItemPayload},
 }
 
 
@@ -323,7 +330,57 @@ def build_preview(action_type: str, payload: dict) -> dict:
         }
         if action_type == "delete_expense":
             preview["gone"] = _more_readable(gone)
+    if action_type == "add_shopping_item":
+        preview.update(_shopping_texts(payload))
     return preview
+
+
+# 购物卡上「清单」那一栏的两种状态。前端按 `list_exists` 决定这句用不用高亮：
+# 清单不存在时用户点确认会**顺手建一张**，这种事必须在卡上明说，
+# 不能等点完才在页面上多出一张他没建过的清单。
+SHOPPING_LIST_EXISTS = "exists"
+SHOPPING_LIST_MISSING = "missing"
+
+
+def _quantity_text(quantity: Any) -> str:
+    """2.00 → 「2」、0.50 → 「0.5」、1.25 → 「1.25」。
+
+    去掉尾随的 0 再显示：卡片上写「牛奶 2.00 个」很别扭，但 0.5 斤不能被截成 0 斤，
+    所以只去尾巴上的 0，不去有效位。
+    """
+    try:
+        value = Decimal(str(quantity))
+    except (InvalidOperation, TypeError, ValueError):
+        return str(quantity)
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _shopping_texts(payload: dict) -> dict:
+    """购物卡的三样东西：每一行的「物品 × 数量 单位」、清单名、清单是否已存在。
+
+    `items` 里的单位可能为空（用户没说），卡片上不能显示「牛奶 × 2 」后面挂个空，
+    所以这里统一补成库里的默认单位「个」，和写入层保持一致 ——
+    卡片写「2 个」而库里存「个」，用户核对时不会觉得对不上。
+    """
+    rows = []
+    for item in payload.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "name": item.get("name"),
+                "quantity_text": _quantity_text(item.get("quantity", 1)),
+                "unit": item.get("unit") or DEFAULT_UNIT,
+            }
+        )
+    return {
+        "items_text": rows,
+        "list_name_text": payload.get("list_name") or DEFAULT_LIST_NAME,
+        "list_exists": payload.get("list_exists", False),
+    }
 
 
 # 改账时「算不算改了」的比较单位。按这个顺序给前端，卡片上就按这个顺序列。
@@ -552,6 +609,22 @@ def create_draft(
             "gone": gone,
         }
 
+    if draft.action_type == "add_shopping_item":
+        # 清单可能还不存在 —— 那不算错误，确认时会顺手建一张。
+        # 但「建不建」必须在**出卡时**定下来写进 payload：卡片上要明写
+        # 「将新建清单『周末采购』」，否则用户点完才发现左栏多了一张自己没建过的清单。
+        #
+        # 判定放在出卡时而不是确认时，还因为这两件事要一致：
+        # 卡上写「加进已有的清单」，点确认时就绝不能变成新建一张同名的。
+        list_name = payload.get("list_name") or DEFAULT_LIST_NAME
+        existing = shopping_crud.find_list(db, user_id, list_name)
+        payload = {
+            "list_name": list_name,
+            "list_exists": existing is not None,
+            "list_id": existing.id if existing is not None else None,
+            "items": payload.get("items") or [],
+        }
+
     if "category_name" in payload:
         payload["category_id"] = resolve_category_id(
             db, draft.action_type, payload.get("category_name")
@@ -647,6 +720,19 @@ def _subject_of(action_type: str, payload: dict) -> tuple:
         return (_norm_title(title),)
     if action_type == "create_expense":
         return (str(payload.get("amount") or ""), _norm_title(payload.get("category_name")))
+    if action_type == "add_shopping_item":
+        # 购物按「清单 + 全部物品名」比：用户说「买牛奶」说了两遍，两张卡的
+        # 物品列表一模一样，算重复；只要多一样少一样，就是新的一件事。
+        # 数量不参与比较 —— 「牛奶 ×1」和「牛奶 ×2」是同一件事改了主意，
+        # 拦下来让模型用文字问一句，比默默多出一张卡好。
+        names = sorted(
+            _norm_title(item.get("name"))
+            for item in (payload.get("items") or [])
+            if isinstance(item, dict)
+        )
+        if not names:
+            return ()
+        return (_norm_title(payload.get("list_name")), tuple(names))
     return ()
 
 

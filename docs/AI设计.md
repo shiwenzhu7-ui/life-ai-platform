@@ -122,12 +122,12 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
 | 7 | `delete_task` | 写入需确认 | V1.1 ✅ | 建草稿（确认后硬删） |
 | 8 | `delete_expense` | 写入需确认 | V1.1 ✅ | 建草稿（确认后硬删） |
 | `search_personal_documents` | 只读 | V1.3 ✅ | Milvus 检索 + MySQL 取正文 |
-| — | `add_shopping_item` | 写入需确认 | V1.4（推迟） | 建草稿 |
+| 9 | `add_shopping_item` | 写入需确认 | V1.4 ✅ | 建草稿（确认后写 `shopping_items`） |
 | — | `query_life_records` | 只读 | V1.4 | 直接查 DB |
 | — | `generate_life_report` | 生成 | V1.4 | 建 `async_tasks` |
 
-> 实际落地 9 个：V1.1 做了 7 个（含表里原未列出的 update/delete 四个），V1.3 加检索。
-> `add_shopping_item` 随购物模块整体推迟到 V1.4；后两个属 V1.4。
+> 实际落地 10 个：V1.1 做了 7 个（含表里原未列出的 update/delete 四个），V1.3 加检索，
+> V1.4 加 `add_shopping_item`；后两个属 V1.4 未做。
 > 代码位置：`backend/modules/lifeweb/ai/tools.py` 的 `ALL_TOOLS`；
 > `READ_ONLY_TOOLS` = `query_tasks` / `query_expenses` / `search_personal_documents`。
 
@@ -221,29 +221,36 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
 }
 ```
 
-**`add_shopping_item`**
+**`add_shopping_item`**（V1.4 ✅ 唯一一个「一张卡写多行」的写入工具）
 
 ```json
 {
   "type": "object",
   "required": ["items"],
+  "additionalProperties": false,
   "properties": {
-    "list_name": { "type": "string", "description": "缺省用「默认清单」" },
+    "list_name": { "type": "string", "maxLength": 64, "description": "缺省用「默认清单」" },
     "items": {
       "type": "array",
+      "minItems": 1,
+      "maxItems": 10,
       "items": {
         "type": "object",
         "required": ["name"],
+        "additionalProperties": false,
         "properties": {
-          "name": { "type": "string" },
-          "quantity": { "type": "number", "default": 1 },
-          "unit": { "type": "string", "default": "个" }
+          "name": { "type": "string", "maxLength": 120 },
+          "quantity": { "type": "number", "exclusiveMinimum": 0, "maximum": 9999.99, "default": 1 },
+          "unit": { "type": "string", "maxLength": 16, "default": "个" }
         }
       }
     }
   }
 }
 ```
+
+> 三条落地约束：一次最多 10 件（超过就让模型重说）；同名物品**不合并**，各建一条；
+> 清单不存在时在卡片上写明「（还没有这张清单，确认后新建）」，确认才真建。
 
 **`search_personal_documents`**
 
@@ -550,6 +557,6 @@ V1.3 是**同步三处清理**，没有引入 `async_tasks` 补偿任务：
 2. `chat_sessions` / `chat_messages` 落库 + `/ai/chat` 最简版（无工具，纯对话）
 3. 注入上下文（now/timezone/categories）到系统提示词
 4. `create_task` 工具 + `ai_pending_actions` + 确认接口（最关键的一步）
-5. `query_tasks`、`create_expense`、`query_expenses`、`add_shopping_item`
+5. `query_tasks`、`create_expense`、`query_expenses`；`add_shopping_item` 改为在 V1.4 随购物模块一起做 ✅
 6. 前端对话页 + 确认卡片
 7. `ai_usage_logs`、配额、失败重试与提示

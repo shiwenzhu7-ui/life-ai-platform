@@ -36,9 +36,11 @@ from core.time import now_utc, to_beijing_iso
 from modules.lifeweb.ai import pending
 from modules.lifeweb.ai.action_schema import UPDATABLE_EXPENSE_FIELDS
 from modules.lifeweb.ai.models import PendingAction
-from modules.lifeweb.ai.pending import CODE_EXPIRED, CODE_REJECTED
+from modules.lifeweb.ai.pending import CODE_BAD_PAYLOAD, CODE_EXPIRED, CODE_REJECTED
 from modules.lifeweb.expenses import crud as expenses_crud
 from modules.lifeweb.expenses.schema import ExpenseCreate, ExpenseUpdate
+from modules.lifeweb.shopping import crud as shopping_crud
+from modules.lifeweb.shopping.schema import DEFAULT_LIST_NAME, DEFAULT_UNIT, ItemCreate
 from modules.lifeweb.tasks import crud as tasks_crud
 from modules.lifeweb.tasks.schema import TaskCreate, TaskUpdate
 
@@ -354,6 +356,53 @@ def _as_datetime(value: Any):
     return value
 
 
+def _write_shopping_item(db: Session, user_id: int, payload: dict) -> dict[str, Any]:
+    """add_shopping_item → 往某张清单里插 N 条明细（V1.4）。
+
+    三个决定：
+
+    1. **清单不存在就顺手建**，但只在出卡时就被判定为「不存在」的情况下建。
+       `list_exists` 是出卡那一刻的快照：卡上写了「将新建清单『周末采购』」，
+       用户点确认就该建；卡上写「加到『周末采购』」，那时它一定存在。
+       真到了执行时发现被删了（用户在另一个标签页删的），按最新的库状态走 ——
+       也就是建一张新的，而不是报错让用户白点。增删都不可逆的动作才需要严格，这里是加数据。
+
+    2. **`source="ai"`**，与 `_write_expense` 同理：这是「这条明细是助手加的」的证据，
+       白名单里没有 source，前端 override 改不了它。
+
+    3. **`commit=False`**：业务写入与卡片置位在同一个事务里，`confirm_action` 统一提交。
+       中途任何一条明细炸了，整张卡一起回滚，不会出现「加了一半」。
+    """
+    items = payload.get("items") or []
+    if not items:
+        # 出卡时 schema 已经要求 ≥1 条，这里是第二道门：一张什么都没加的卡
+        # 如果被确认成功，用户会以为加上了
+        raise AppError(CODE_BAD_PAYLOAD, "这张卡里没有要加的东西", 422)
+
+    shopping_list = shopping_crud.find_or_create_default_list(
+        db, user_id, payload.get("list_name") or DEFAULT_LIST_NAME, commit=False
+    )
+
+    item_ids: list[int] = []
+    for raw in items:
+        create = ItemCreate(
+            name=raw["name"],
+            quantity=raw.get("quantity") or 1,
+            unit=raw.get("unit") or DEFAULT_UNIT,
+        )
+        item = shopping_crud.create_item(
+            db, user_id, shopping_list.id, create, source="ai", commit=False
+        )
+        item_ids.append(item.id)
+
+    return {
+        "type": "shopping_list",
+        "id": shopping_list.id,
+        "name": shopping_list.name,
+        "item_ids": item_ids,
+    }
+
+
 # 动作类型 → 写入函数。每个动作类型都在这里登记一行，`confirm` 不用改
 _WRITERS: dict[str, Callable[[Session, int, dict], dict[str, Any]]] = {
     "create_task": _write_task,
@@ -362,6 +411,7 @@ _WRITERS: dict[str, Callable[[Session, int, dict], dict[str, Any]]] = {
     "delete_task": _write_delete,
     "update_expense": _write_update_expense,
     "delete_expense": _write_delete_expense,
+    "add_shopping_item": _write_shopping_item,
 }
 
 

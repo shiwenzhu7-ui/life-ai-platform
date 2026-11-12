@@ -489,6 +489,61 @@ SEARCH_DOCUMENTS: dict = {
     },
 }
 
+ADD_SHOPPING_ITEM: dict = {
+    "type": "function",
+    "function": {
+        "name": "add_shopping_item",
+        "description": (
+            "往购物清单里加东西。只在用户明确要「买点啥、加进清单」时调用，"
+            "例如「帮我记一下要买牛奶和鸡蛋」「周末采购加上酱油」。"
+            "用户只是说今天吃了什么、花了多少钱时不要调用（那是记账，用 create_expense）。"
+            "一次能加多件：用户一口气说三四样就全部放进 items，不要一件一张卡。"
+            "list_name 只在用户点名了清单时填（「加到周末采购里」），"
+            "没点名就省略，后端会放进「默认清单」。"
+            "数量没说就省略，默认 1；单位没说也省略，默认「个」。"
+            "调用后只能说「我整理了一张清单卡片，请你确认」，绝不能说你已经加进去了。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "list_name": {
+                    "type": "string",
+                    "description": "目标清单名，≤ 64 字。用户没点名就不传，不要自己造一个名字",
+                },
+                "items": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 10,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": "物品名，≤ 120 字。写用户原话里的东西，不要展开成规格",
+                            },
+                            "quantity": {
+                                "type": "number",
+                                "exclusiveMinimum": 0,
+                                "maximum": 9999.99,
+                                "description": "数量，最多两位小数。没说就省略（=1）",
+                            },
+                            "unit": {
+                                "type": "string",
+                                "description": "单位：个 / 斤 / 盒 / 袋 / 瓶。没说就省略",
+                            },
+                        },
+                        "required": ["name"],
+                        "additionalProperties": False,
+                    },
+                    "description": "要加的物品，最多 10 件",
+                },
+            },
+            "required": ["items"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 # 顺序固定：以后加工具就往后追加，测试与请求体都依赖这个顺序稳定
 ALL_TOOLS: list[dict] = [
     CREATE_TASK,
@@ -500,6 +555,7 @@ ALL_TOOLS: list[dict] = [
     UPDATE_EXPENSE,
     DELETE_EXPENSE,
     SEARCH_DOCUMENTS,
+    ADD_SHOPPING_ITEM,
 ]
 
 # 只读工具名：tool_flow 据此分流 —— 这批立刻执行并回灌，不产生待确认卡片。
@@ -520,6 +576,7 @@ WRITE_TOOLS: frozenset[str] = frozenset(
         "delete_task",
         "update_expense",
         "delete_expense",
+        "add_shopping_item",
     }
 )
 
@@ -527,7 +584,9 @@ WRITE_TOOLS: frozenset[str] = frozenset(
 # tool_flow 用它决定「模型没调工具时值不值得再问一次」：
 # 明确下令却漏调，是模型的问题；用户只是闲聊提了一句「我最近在看书」，
 # 补问反而是在把他没想记的东西往库里塞。
-WRITE_INTENT = re.compile(r"(帮我记|记个|记一下|记一笔|记下来|记下|提醒我|帮我加|待办)")
+WRITE_INTENT = re.compile(
+    r"(帮我记|记个|记一下|记一笔|记下来|记下|提醒我|帮我加|加进|加到|待办|要买|买点|买些|采购)"
+)
 
 # 模型可能申请一个不存在的工具名（幻觉），用集合一秒判断认不认。
 # frozenset 不可变，也不怕谁 import 之后 append

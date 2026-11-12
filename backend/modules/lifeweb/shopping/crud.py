@@ -35,7 +35,13 @@ from core.errors import conflict
 
 from core.time import now_utc
 from modules.lifeweb.shopping.model import ShoppingItem, ShoppingList
-from modules.lifeweb.shopping.schema import ItemCreate, ItemUpdate, ListCreate, ListUpdate
+from modules.lifeweb.shopping.schema import (
+    DEFAULT_LIST_NAME,
+    ItemCreate,
+    ItemUpdate,
+    ListCreate,
+    ListUpdate,
+)
 
 # 清单列表的排序：新清单排前面，同一秒建的用 id 兜底（数据库不保证稳定顺序）
 _LATEST_FIRST = (ShoppingList.created_at.desc(), ShoppingList.id.desc())
@@ -574,8 +580,23 @@ def _like(keyword: str) -> str:
     return f"%{raw}%"
 
 
+def find_list(db: Session, user_id: int, name: str) -> ShoppingList | None:
+    """按名字找一张清单（含已归档的），找不到返回 None。
+
+    `add_shopping_item` 出卡时用它判断「这张清单到底存不存在」，
+    好决定卡片上写「加到『周末采购』」还是「将新建清单『周末采购』」。
+    复用唯一索引覆盖的 `(user_id, name)` 条件，查询是走索引的。
+    """
+    return db.scalar(
+        select(ShoppingList).where(
+            ShoppingList.user_id == user_id,
+            ShoppingList.name == name,
+        )
+    )
+
+
 def find_or_create_default_list(
-    db: Session, user_id: int, name: str = "默认清单", *, commit: bool = True
+    db: Session, user_id: int, name: str = DEFAULT_LIST_NAME, *, commit: bool = True
 ) -> ShoppingList:
     """按名字找清单，没有就建一个 —— 给 AI 的 `add_shopping_item` 用。
 

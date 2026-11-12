@@ -28,6 +28,30 @@
       </template>
     </dl>
 
+    <!--
+      购物卡：一次可能加好几件，字段列表装不下（一件一行才对得上眼睛）。
+      清单那一栏必须说清「加进已有的清单」还是「会新建一张」——
+      后者在点确认时会凭空多出一张用户没建过的清单，不能等他点完才发现。
+    -->
+    <div v-if="isShopping" class="pa-card__items">
+      <div class="pa-card__list-row">
+        <span class="pa-card__label">清单</span>
+        <span v-if="preview.list_exists" class="pa-card__value">
+          {{ preview.list_name_text }}
+        </span>
+        <span v-else class="pa-card__value pa-card__value--new">
+          {{ preview.list_name_text }}
+          <span class="pa-card__note">（还没有这张清单，确认后新建）</span>
+        </span>
+      </div>
+      <ul class="pa-card__item-list">
+        <li v-for="(row, index) in itemRows" :key="index" class="pa-card__item">
+          <span class="pa-card__item-name">{{ row.name }}</span>
+          <span class="pa-card__item-qty">{{ row.quantity_text }} {{ row.unit }}</span>
+        </li>
+      </ul>
+    </div>
+
     <footer class="pa-card__foot">
       <!-- 只在还能操作时出现按钮：已确认 / 已取消 / 已过期的卡不该让人再点 -->
       <template v-if="actionable">
@@ -58,7 +82,7 @@
           :to="createdLink"
           class="pa-card__link"
         >
-          查看待办 ▸
+          查看{{ linkText }} ▸
         </router-link>
       </template>
 
@@ -148,11 +172,22 @@ export default {
         this.action.action_type === 'delete_expense'
       )
     },
+    // 购物卡走自己那套渲染（多行物品），不走 dl 字段列表
+    isShopping() {
+      return this.action.action_type === 'add_shopping_item'
+    },
+    // 后端在 build_preview 里把「物品 × 数量 单位」算好了（items_text），
+    // 前端不重复解析 quantity 字符串 —— 那也是「规则散两处」。
+    itemRows() {
+      const rows = this.preview.items_text
+      return Array.isArray(rows) ? rows : []
+    },
     confirmButtonType() {
       return this.isDelete ? 'danger' : 'primary'
     },
     confirmText() {
       if (this.isDelete) return '删除'
+      if (this.isShopping) return '加入清单'
       return this.action.action_type === 'update_task' ||
         this.action.action_type === 'update_expense'
         ? '确认修改'
@@ -264,6 +299,7 @@ export default {
     shownFields() {
       if (this.isDelete) return this.deleteFields
       if (this.action.action_type === 'update_expense') return []
+      if (this.isShopping) return []
       if (this.isExpense) return this.expenseFields(this.preview)
       return this.fields
     },
@@ -289,6 +325,13 @@ export default {
           expired: '超过 30 分钟未处理，已失效'
         }[this.status] || ''
       }
+      if (this.isShopping) {
+        return {
+          confirmed: `已加进「${this.preview.list_name_text}」`,
+          cancelled: '已取消，清单没有变动',
+          expired: '超过 30 分钟未处理，已失效'
+        }[this.status] || ''
+      }
       return {
         confirmed: this.isExpense ? '已按这张卡记好' : '已按这张卡创建完成',
         cancelled: '已取消，没有写入任何数据',
@@ -298,10 +341,20 @@ export default {
     // V1.0 的待办只有列表页（没有 /tasks/:id 详情路由），所以链到列表。
     // `created_id` 由页面在确认成功后回填（接口只在确认那一次返回它）。
     // 删除卡不显示这个链接：那条待办刚被删掉，点进去只会看到「列表里没有它」。
+    // 链接的宾语：链到哪一页就说哪一页的名字，不然「查看待办 ▸」指向购物清单
+    linkText() {
+      if (this.isShopping) return '清单'
+      if (this.action.action_type === 'update_expense') return '账本'
+      return '待办'
+    },
     createdLink() {
       if (this.isDelete) return null
       if (this.action.action_type === 'update_expense') {
         return this.status === 'confirmed' ? '/expenses' : null
+      }
+      // 购物清单没有 /shopping/:id 路由，只能链到列表页
+      if (this.isShopping) {
+        return this.status === 'confirmed' ? '/shopping' : null
       }
       return this.status === 'confirmed' && this.action.created_id ? '/tasks' : null
     }
@@ -444,6 +497,66 @@ export default {
   .pa-card--expired & {
     color: #909399;
   }
+}
+
+// 购物卡的物品清单：一件一行，名字靠左、数量靠右。
+// 用列表而不是表格：最多 10 行，表格的边框在气泡里显得很重。
+.pa-card__items {
+  margin: 0 0 10px;
+  font-size: 13px;
+}
+
+.pa-card__list-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.pa-card__value--new {
+  color: #e6a23c;
+}
+
+// 「（还没有这张清单…）」比主体小一号、不抢眼，但必须能看见
+.pa-card__note {
+  font-size: 11px;
+  color: #909399;
+
+  .pa-card--confirmed &,
+  .pa-card--cancelled &,
+  .pa-card--expired & {
+    color: #c0c4cc;
+  }
+}
+
+.pa-card__item-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pa-card__item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+  color: #303133;
+
+  .pa-card--confirmed &,
+  .pa-card--cancelled &,
+  .pa-card--expired & {
+    color: #909399;
+  }
+}
+
+.pa-card__item-name {
+  word-break: break-all;
+}
+
+.pa-card__item-qty {
+  margin-left: auto;
+  flex: none;
+  color: #909399;
 }
 
 .pa-card__foot {

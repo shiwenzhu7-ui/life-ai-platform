@@ -64,6 +64,7 @@ ACTION_TYPE_BY_TOOL: dict[str, str] = {
     "delete_task": "delete_task",
     "update_expense": "update_expense",
     "delete_expense": "delete_expense",
+    "add_shopping_item": "add_shopping_item",
 }
 
 # 一次回复里最多采纳几份草稿。
@@ -382,6 +383,83 @@ class DeleteExpensePayload(BaseModel):
         return DeleteTaskPayload.blank_reason_means_none(value)
 
 
+# 一次最多加几件。与 tools.py 里 items 的 maxItems 一致：
+# 那边是说明书，这边是闸门。不设上限的话模型能把一整张超市小票塞进来，
+# 卡片上十几行没人看得完，用户会直接点取消。
+MAX_SHOPPING_ITEMS = 10
+
+# 购物数量上限，与 shopping.schema 的 MAX_QUANTITY 同值
+MAX_ITEM_QUANTITY = Decimal("9999.99")
+
+
+class ShoppingItemDraft(BaseModel):
+    """一件要买的东西。字段与 `add_shopping_item` 的 items[] 一一对应。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+    quantity: Decimal = Field(
+        default=Decimal("1"),
+        gt=0,
+        le=MAX_ITEM_QUANTITY,
+        max_digits=10,
+        decimal_places=2,
+    )
+    unit: str | None = Field(default=None, max_length=16)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("物品名不能为空")
+        return stripped
+
+    @field_validator("quantity", mode="before")
+    @classmethod
+    def null_quantity_means_default(cls, value: Any) -> Any:
+        """模型表达「没说数量」有两种写法：省略这个键，或者显式传 `null`。
+
+        省略时 pydantic 会用默认值 1，但显式 `null` 会在 `Decimal` 校验那一步炸掉，
+        整张卡就没了 —— 用户说「买点鸡蛋」，得到的却是「参数不合格，请再试一次」。
+        """
+        return 1 if value is None else value
+
+    @field_validator("unit", mode="before")
+    @classmethod
+    def blank_unit_means_none(cls, value: Any) -> Any:
+        """模型常把「没说单位」写成 `""`。空串不能当单位存进去（库里默认是「个」），
+        统一收成 None，交给写入层补默认值。"""
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
+
+
+class AddShoppingItemPayload(BaseModel):
+    """add_shopping_item 的草稿：要加进哪张清单、加哪几件。
+
+    `list_name` 省略 = 「默认清单」。「要不要新建清单」的判定不在这一步，
+    因为那要查库（本文件是纯函数）。这里只保证：名字非空、件数在 1～10、数量合理。
+
+    重复物品**不合并**：用户说「买牛奶」，清单里已有牛奶，就再多一行。
+    合并要先读出清单再比名字，那是写入层的事；而且「两条牛奶」在采购场景里
+    本来就可能是对的（买两批）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    list_name: str | None = Field(default=None, max_length=64)
+    items: list[ShoppingItemDraft] = Field(min_length=1, max_length=MAX_SHOPPING_ITEMS)
+
+    @field_validator("list_name", mode="before")
+    @classmethod
+    def blank_list_name_means_none(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
+
+
 # 工具名 → 校验模型。加写入工具时在这里加一行，`parse_tool_calls` 不用改
 PAYLOAD_MODELS: dict[str, type[BaseModel]] = {
     "create_task": CreateTaskPayload,
@@ -390,6 +468,7 @@ PAYLOAD_MODELS: dict[str, type[BaseModel]] = {
     "delete_task": DeleteTaskPayload,
     "update_expense": UpdateExpensePayload,
     "delete_expense": DeleteExpensePayload,
+    "add_shopping_item": AddShoppingItemPayload,
 }
 
 # 一次查询最多返回几条。与 tools.py 里 limit 的 maximum 是同一个数：
