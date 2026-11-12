@@ -39,6 +39,12 @@ const routes = [
         meta: { title: '消费' }
       },
       {
+        path: 'shopping',
+        name: 'shopping',
+        component: () => import('../views/shopping/index.vue'),
+        meta: { title: '购物清单' }
+      },
+      {
         path: 'knowledge',
         name: 'knowledge',
         component: () => import('../views/knowledge/index.vue'),

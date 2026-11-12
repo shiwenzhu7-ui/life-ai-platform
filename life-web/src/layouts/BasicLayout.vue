@@ -55,6 +55,7 @@ const MENUS = [
   { path: '/', title: '首页', icon: 'el-icon-s-home' },
   { path: '/tasks', title: '待办', icon: 'el-icon-s-order' },
   { path: '/expenses', title: '消费', icon: 'el-icon-s-finance' },
+  { path: '/shopping', title: '购物', icon: 'el-icon-shopping-cart-2' },
   { path: '/knowledge', title: '知识库', icon: 'el-icon-notebook-2' },
   { path: '/ai', title: 'AI 助手', icon: 'el-icon-chat-dot-round' }
 ]

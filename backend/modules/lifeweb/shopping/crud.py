@@ -91,11 +91,14 @@ def list_lists(
     *,
     page: int = 1,
     size: int = 20,
-    status: str | None = "active",
+    status: str = "active",
 ) -> tuple[list[tuple[ShoppingList, int, int]], int]:
     """清单列表，每项带 (清单, 总条数, 未购条数)。
 
-    `status=None` 表示不筛选（归档的也一并返回）。
+    `status` 由 router 的 Query(default="active") 保证非空 —— 接口层没有
+    「不筛选」这个入口（传 null 会被 compactParams 去掉、传 'all' 会被
+    Literal 拦成 422），所以这里不留 `status is None` 的分支：
+    写一条永远走不到的路，比不写更容易误导后来的人。
 
     返回元组列表而不是 ORM 对象列表：计数是 join 出来的额外列，
     往 ORM 对象上挂临时属性会让别处的代码也看着它 ——
@@ -108,9 +111,7 @@ def list_lists(
 
     counts = _counts_subquery(user_id)
 
-    base = _list_base(user_id)
-    if status is not None:
-        base = base.where(ShoppingList.status == status)
+    base = _list_base(user_id).where(ShoppingList.status == status)
 
     total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
 
