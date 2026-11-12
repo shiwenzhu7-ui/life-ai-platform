@@ -117,7 +117,8 @@ class ShoppingItem(Base):
     # 同一清单内手动排序；AI 追加的项给最大值，排在最后
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
-    # manual = 用户手加；ai = 助手确认后写入（本版本唯一的写入来源）
+    # manual = 用户在页面上手加；ai = 助手确认后写入。
+    # 两个人的入口都开着，所以这个字段是用来「事后区分来源」，不是限制谁能写。
     source: Mapped[str] = mapped_column(
         Enum(*SHOPPING_ITEM_SOURCES, name="shopping_item_source"),
         nullable=False,
