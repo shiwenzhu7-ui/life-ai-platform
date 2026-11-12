@@ -20,6 +20,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects import mysql
@@ -33,7 +34,14 @@ SHOPPING_ITEM_SOURCES = ("manual", "ai")
 
 class ShoppingList(Base):
     __tablename__ = "shopping_lists"
-    __table_args__ = (Index("idx_shopping_lists_user", "user_id", "status"),)
+    __table_args__ = (
+        Index("idx_shopping_lists_user", "user_id", "status"),
+        # 同一个人不能有两张同名清单（归档的也算）：AI 的 add_shopping_item
+        # 靠名字找清单，重名会让它落到哪张变成随机事件。
+        # 加在这里也是为了 alembic check 能认出「模型与库一致」，
+        # 漏写会被 autogenerate 报成「要删掉这个索引」。
+        UniqueConstraint("user_id", "name", name="uk_shopping_lists_user_name"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
 

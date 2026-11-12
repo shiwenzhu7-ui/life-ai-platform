@@ -162,6 +162,91 @@ def test_create_list_ignores_client_supplied_user_or_status(client):
     assert _load_list(body["id"]).user_id == 1
 
 
+def test_duplicate_list_name_is_409(client):
+    """同一个人不能有两张同名清单（唯一索引 uk_shopping_lists_user_name）。"""
+    _list(client, name="周末采购")
+
+    res = client.post(LISTS, json={"name": "周末采购"})
+    assert res.status_code == 409, res.text
+    assert "周末采购" in res.json()["message"]
+
+    with new_session() as s:
+        assert s.scalar(
+            select(func.count())
+            .select_from(ShoppingList)
+            .where(ShoppingList.user_id == 1, ShoppingList.name == "周末采购")
+        ) == 1
+
+
+def test_archived_list_frees_its_name_for_rebuild(client):
+    """归档后可以重建同名清单 —— 归档那张自动改名成「每日鲜(1)」腾出位置。"""
+    first = _list(client, name="每日鲜")
+    client.patch(f"{LISTS}/{first['id']}", json={"status": "archived"})
+
+    second = _list(client, name="每日鲜")  # 这次必须成功
+    assert second["name"] == "每日鲜"
+    assert _load_list(first["id"]).name == "每日鲜(1)"
+    assert _load_list(first["id"]).status == "archived"
+    assert _load_list(second["id"]).name == "每日鲜"
+
+
+def test_repeated_archive_numbers_the_copies(client):
+    """归档 → 重建 → 再归档，副本依次叫 (1)、(2)。最新的那张永远叫原名。"""
+    names = []
+    for _ in range(3):
+        body = _list(client, name="购物")
+        client.patch(f"{LISTS}/{body['id']}", json={"status": "archived"})
+        names.append(body["id"])
+
+    current = _list(client, name="购物")
+    assert current["name"] == "购物"
+    archived = sorted(
+        _load_list(list_id).name for list_id in names
+    )
+    assert archived == ["购物(1)", "购物(2)", "购物(3)"]
+
+
+def test_archiving_an_archived_copy_does_not_stack_suffixes(client):
+    """已经带 (n) 的名字再归档一次，只能换成下一个号，不能叠成「周末(1)(1)」。
+
+    这是第一版改名的真实 bug：直接往后加 (1)，于是「周末(1)」变成「周末(1)(1)」。
+    正确行为是先剥掉末尾后缀，再从 1 往上找空位。
+    """
+    first = _list(client, name="器材")
+    client.patch(f"{LISTS}/{first['id']}", json={"status": "archived"})  # 器材(1)
+    second = _list(client, name="器材")
+    client.patch(f"{LISTS}/{second['id']}", json={"status": "archived"})  # 器材(2)
+
+    # 恢复再归档：名字带后缀进来，出去必须还是「器材(?)」，不能叠加
+    client.patch(f"{LISTS}/{second['id']}", json={"status": "active"})
+    client.patch(f"{LISTS}/{second['id']}", json={"status": "archived"})
+
+    name = _load_list(second["id"]).name
+    assert name.count("(") == 1, name
+    assert name in {"器材(1)", "器材(2)", "器材(3)"}, name
+
+
+def test_only_one_active_list_per_name(client):
+    """重建一次之后，再建第二张同名就必须被拦 —— 同一时刻只有一张 active。"""
+    first = _list(client, name="省心")
+    client.patch(f"{LISTS}/{first['id']}", json={"status": "archived"})
+    _list(client, name="省心")
+
+    res = client.post(LISTS, json={"name": "省心"})
+    assert res.status_code == 409, res.text
+
+
+def test_rename_onto_existing_name_is_409(client):
+    """改名同样撞唯一索引：PATCH 也得走同一条 409 路径。"""
+    _list(client, name="甲")
+    second = _list(client, name="乙")
+
+    res = client.patch(f"{LISTS}/{second['id']}", json={"name": "甲"})
+    assert res.status_code == 409, res.text
+    # 失败不能留下半截状态：名字仍是乙
+    assert _load_list(second["id"]).name == "乙"
+
+
 # ---------------------------------------------------------------- 清单：详情 / 修改 / 删除
 
 
