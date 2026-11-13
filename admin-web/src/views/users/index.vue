@@ -200,19 +200,22 @@
         <p class="users__drawer-note">
           禁用后该账号的登录请求会被拒绝（403），但历史数据不会删除。
         </p>
-      </div>
 
-      <div slot="footer" class="users__drawer-footer">
-        <el-button size="small" @click="closeEdit">取消</el-button>
-        <el-button
-          size="small"
-          type="primary"
-          :loading="saving"
-          :disabled="!canSave"
-          @click="onSave"
-        >
-          保存
-        </el-button>
+        <!-- 按钮放在抽屉内容里、用 sticky 钉在底部。
+             原先用 slot="footer"，抽屉一变高 footer 就被挤到可视区外，
+             用户根本看不到「保存」按钮 —— 这不是样式问题，是功能没了。 -->
+        <div class="users__drawer-actions">
+          <el-button size="small" @click="closeEdit">取消</el-button>
+          <el-button
+            size="small"
+            type="primary"
+            :loading="saving"
+            :disabled="!canSave"
+            @click="onSave"
+          >
+            保存
+          </el-button>
+        </div>
       </div>
     </el-drawer>
   </div>
@@ -532,7 +535,7 @@ export default {
   }
 
   &__drawer {
-    padding: 0 20px;
+    padding: 0 20px 16px;
   }
 
   &__drawer-account {
@@ -561,6 +564,19 @@ export default {
   &__drawer-footer {
     text-align: right;
     padding: 0 20px;
+  }
+
+  &__drawer-actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 20px;
+    padding: 12px 0 4px;
+    background: #fff;
+    border-top: 1px solid #ebeef5;
   }
 }
 </style>

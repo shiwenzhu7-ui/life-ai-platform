@@ -45,3 +45,11 @@ code {
     color: #909399;
   }
 }
+
+/* 抽屉内容区默认没有高度约束：内容一长，底部的按钮会被顶出可视区，
+   看上去就像「根本没有保存按钮」。这里让它自己纵向滚动，按钮再用 sticky 钉底。 */
+.el-drawer__body {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
