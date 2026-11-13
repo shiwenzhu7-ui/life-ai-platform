@@ -51,5 +51,5 @@ def logout(user_id=Depends(get_current_user)) -> Response:
 
 
 @router.get("/me", response_model=UserOut, summary="当前用户信息")
-def me(user: User = Depends(get_current_user)) -> UserOut:
-    return service.me(user)
+def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> UserOut:
+    return service.me(db, user)

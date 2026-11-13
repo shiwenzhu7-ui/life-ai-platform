@@ -93,6 +93,18 @@ class Settings(BaseSettings):
     # 单次检索返回的片段数（docs/项目规划.md S4：top_k=5）
     kb_top_k: int = 5
 
+    # ---------- 管理后台分级（V1.4）----------
+    # 根管理员（库里的第一级）：只能由「第零级」设置，设完之后就不许在后台被改动。
+    # 两种写法二选一，都指向同一个「第一个管理员」：
+    #   - 不给（默认）：取 users 表里 id 最小的 role=admin 用户，随库里现状走；
+    #   - 给用户 ID：在 .env 里钉死，换机器/换种子数据也不漂。
+    # 名字带 admin 下文，因为 .env 变量会映射成不带前缀的大写形式。
+    admin_root_user_id: int = 0
+
+    @property
+    def is_root_admin_configured(self) -> bool:
+        return self.admin_root_user_id > 0
+
     @property
     def llm_ready(self) -> bool:
         """key 是否已配置 —— AI 接口用它决定是不是直接拒绝服务。"""

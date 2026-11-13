@@ -80,15 +80,21 @@ def login(db: Session, data: LoginIn) -> TokenOut:
     )
 
 
-def me(user: User) -> UserOut:
+def me(db: Session, user: User) -> UserOut:
     """当前用户信息。role/status 由依赖层校验过（get_current_user）。
 
     V1.2 曾在这里顺带返回 AI 每日额度与今日已用次数（要查一次 ai_usage_logs）。
-    2026-11-10 取消额度限制后，这里不再碰数据库 —— 连 db 参数都不需要了。
+    2026-11-10 取消额度限制后，这里不再碰用量数据。
+
+    V1.4 为了返回 `is_root_admin` 又碰了一次库：根管理员可能是「id 最小的 admin」
+    （随库变化），不能只凭 JWT 里的 role 判断。只走一次按 id 排序的 limit 1 查询。
     """
+    from modules.adminweb.users.permission import is_root
+
     return UserOut(
         id=user.id,
         username=user.username,
         nickname=user.nickname,
         role=user.role,
+        is_root_admin=is_root(db, user),
     )

@@ -145,5 +145,12 @@ def conflict(message: str = "资源冲突") -> AppError:
     return AppError("CONFLICT", message, 409)
 
 
-def validation_error(message: str, detail: dict | None = None) -> AppError:
-    return AppError("VALIDATION_ERROR", message, 422, detail)
+def validation_error(
+    message: str, detail: dict | None = None, *, code: str = "VALIDATION_ERROR"
+) -> AppError:
+    """422：参数在当前状态下不合法。
+
+    管理后台的分级闸门用 `code` 细分（ROOT_PROTECTED / CANNOT_GRANT_ADMIN 等），
+    前端据此决定文案，不靠 message 字符串匹配。默认值保持老行为。
+    """
+    return AppError(code, message, 422, detail)

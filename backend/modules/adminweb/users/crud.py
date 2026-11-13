@@ -11,6 +11,7 @@ from sqlalchemy import String, case, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from core.errors import not_found, validation_error
+from modules.adminweb.users.permission import check_can_update
 from modules.lifeweb.ai.models.usage_log import UsageLog
 from modules.shared.users.model import User
 
@@ -85,34 +86,17 @@ def get_user(db: Session, user_id: int) -> User:
 
 
 def update_user(
-    db: Session, target: User, *, role: str | None, status: str | None, actor_id: int
+    db: Session, target: User, *, role: str | None, status: str | None, actor: User
 ) -> User:
-    """改角色或状态。
+    """改角色或状态。分级权限在 `permission.check_can_update` 里，这里只管落库。
 
-    两个不能踩的坑，都在这里挡住：
-
-    1. **管理员不能把自己降级或禁用**。他能点进去把自己改成 disabled，
-       下次刷新就再也进不来，而库里又没有第二个管理员 —— 等于把自己锁在门外。
-    2. **不能把最后一个管理员改掉**。哪怕改的是别人，如果库里只有他一个 admin，
-       改完之后整个后台就没人能进了。
+    `actor` 传整个用户对象而不是 ID：分级判断要读"操作者是不是根管理员"，
+    多一次 `db.get` 不如直接把已经查出来的对象传进来。
     """
     if role is None and status is None:
         raise validation_error("没有需要修改的字段")
 
-    if target.id == actor_id:
-        if role is not None and role != "admin":
-            raise validation_error("不能修改自己的角色，请让其他管理员操作")
-        if status is not None and status != "active":
-            raise validation_error("不能禁用自己")
-
-    if target.role == "admin" and (role not in (None, "admin") or status == "disabled"):
-        admins = db.execute(
-            select(func.count(User.id)).where(
-                User.role == "admin", User.status == "active", User.deleted_at.is_(None)
-            )
-        ).scalar_one()
-        if admins <= 1:
-            raise validation_error("这是最后一个可用的管理员，不能降级或禁用")
+    check_can_update(db, actor=actor, target=target, role=role, status=status)
 
     if role is not None:
         target.role = role

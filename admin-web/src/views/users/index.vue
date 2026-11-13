@@ -70,10 +70,11 @@
 
     <el-table v-loading="loading" :data="rows" border class="users__table">
       <el-table-column prop="id" label="ID" width="70" />
-      <el-table-column prop="username" label="用户名" min-width="130">
+      <el-table-column prop="username" label="用户名" min-width="150">
         <template slot-scope="{ row }">
           <span>{{ row.username }}</span>
           <el-tag v-if="isSelf(row)" size="mini" class="users__self">我</el-tag>
+          <el-tag v-if="isRoot(row)" size="mini" type="danger" class="users__root">根管理员</el-tag>
         </template>
       </el-table-column>
       <el-table-column prop="nickname" label="昵称" min-width="120">
@@ -103,11 +104,24 @@
       <el-table-column label="注册时间" width="150">
         <template slot-scope="{ row }">{{ formatDateTime(row.created_at) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="90" fixed="right" align="center">
+      <el-table-column label="操作" width="110" fixed="right" align="center">
         <template slot-scope="{ row }">
-          <el-button type="text" size="small" :disabled="forbidden" @click="openEdit(row)">
-            编辑
-          </el-button>
+          <el-tooltip
+            :disabled="!rowLockReason(row)"
+            :content="rowLockReason(row)"
+            placement="left"
+          >
+            <span>
+              <el-button
+                type="text"
+                size="small"
+                :disabled="forbidden || !canEditRow(row)"
+                @click="openEdit(row)"
+              >
+                编辑
+              </el-button>
+            </span>
+          </el-tooltip>
         </template>
       </el-table-column>
 
@@ -151,23 +165,35 @@
           </el-form-item>
 
           <el-form-item label="角色">
-            <el-radio-group v-model="form.role" :disabled="isSelf(editing)">
-              <el-radio v-for="item in roleOptions" :key="item.value" :label="item.value">
+            <el-radio-group v-model="form.role" :disabled="isSelf(editing) || isRoot(editing)">
+              <el-radio
+                v-for="item in roleOptions"
+                :key="item.value"
+                :label="item.value"
+                :disabled="item.value === 'admin' && adminOptionDisabled"
+              >
                 {{ item.label }}
               </el-radio>
             </el-radio-group>
             <p v-if="isSelf(editing)" class="users__drawer-tip">
               不能修改自己的角色，请让其他管理员操作
             </p>
+            <p v-else-if="isRoot(editing)" class="users__drawer-tip">
+              这是根管理员，任何人都不能修改，包括角色和状态
+            </p>
+            <p v-else-if="adminOptionDisabled" class="users__drawer-tip">
+              只有根管理员可以把别人设为管理员
+            </p>
           </el-form-item>
 
           <el-form-item label="状态">
-            <el-radio-group v-model="form.status" :disabled="isSelf(editing)">
+            <el-radio-group v-model="form.status" :disabled="isSelf(editing) || isRoot(editing)">
               <el-radio v-for="item in statusOptions" :key="item.value" :label="item.value">
                 {{ item.label }}
               </el-radio>
             </el-radio-group>
             <p v-if="isSelf(editing)" class="users__drawer-tip">不能禁用自己</p>
+            <p v-else-if="isRoot(editing)" class="users__drawer-tip">根管理员不能被禁用</p>
           </el-form-item>
         </el-form>
 
@@ -267,7 +293,18 @@ export default {
     canSave() {
       if (!this.editing) return false
       if (this.isSelf(this.editing)) return false
+      if (this.isRoot(this.editing)) return false
+      // 第二级不能动管理员（含授予/撤销）
+      if (this.editing.role === 'admin' && !this.iAmRoot) return false
+      if (this.form.role === 'admin' && !this.iAmRoot) return false
       return this.form.role !== this.editing.role || this.form.status !== this.editing.status
+    },
+
+    // 角色单选里哪些选项该灰掉
+    //   - 根管理员：改谁的角色都行
+    //   - 普通管理员：只能设成 user / vip，「管理员」那一项不给选
+    adminOptionDisabled() {
+      return !this.iAmRoot
     }
   },
 
@@ -381,9 +418,40 @@ export default {
     },
 
     // ---------- 展示 ----------
+    // 双重校验 id 和 username：万一 Vuex 里还是上一个账号的旧对象，
+    // 光比 id 会把「同一 id 的别人」认成自己，导致编辑别人的抽屉被锁死（真实 bug）。
     isSelf(row) {
       const me = this.$store.state.user.user
-      return Boolean(me && row && me.id === row.id)
+      if (!me || !row) return false
+      return me.id === row.id && me.username === row.username
+    },
+
+    // 第一级根管理员：谁都不能动，界面上连编辑按钮都不给
+    isRoot(row) {
+      return Boolean(row && row.is_root_admin)
+    },
+
+    // 我是不是根管理员（能不能授予/撤销管理员）
+    iAmRoot() {
+      const me = this.$store.state.user.user
+      return Boolean(me && me.is_root_admin)
+    },
+
+    // 这一行我能不能动。规则和后端 permission.check_can_update 一一对应，
+    // 这里只是提前把按钮按住，真正的判定永远在后端。
+    canEditRow(row) {
+      if (this.forbidden || !row) return false
+      if (this.isSelf(row)) return true // 点了会进抽屉，但里面的 radio 是禁用的，能看到原因
+      if (this.isRoot(row)) return false // 根管理员谁都动不了
+      if (row.role === 'admin' && !this.iAmRoot) return false // 第二级不能碰任何管理员
+      return true
+    },
+
+    // 每一行不能编辑的原因，做 tooltip 用
+    rowLockReason(row) {
+      if (this.isRoot(row)) return '根管理员，任何人都不能修改'
+      if (row.role === 'admin' && !this.iAmRoot) return '只有根管理员能修改管理员账号'
+      return ''
     },
 
     roleLabel(role) {
@@ -438,6 +506,11 @@ export default {
   }
 
   &__self {
+    margin-left: 6px;
+    transform: scale(0.85);
+  }
+
+  &__root {
     margin-left: 6px;
     transform: scale(0.85);
   }

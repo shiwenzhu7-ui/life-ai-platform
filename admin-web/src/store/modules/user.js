@@ -33,7 +33,11 @@ export default {
     // ⚠️ 这只是「界面上显示什么」的依据，不是安全边界：
     // 真正能不能读到数据，取决于后端 require_role("admin")。
     // 页面上拿它来隐藏改角色按钮，只是别让人点了才挨一句 403。
-    isAdmin: (state) => Boolean(state.user && state.user.role === 'admin')
+    isAdmin: (state) => Boolean(state.user && state.user.role === 'admin'),
+
+    // 第一级：根管理员。只有他能把人设为管理员，且谁都动不了他。
+    // 判定在后端（permission.is_root），这里只读它给出的 is_root_admin。
+    isRootAdmin: (state) => Boolean(state.user && state.user.is_root_admin)
   },
 
   mutations: {
@@ -58,6 +62,12 @@ export default {
         throw new Error(toErrorMessage(error, '登录失败，请稍后重试'))
       }
 
+      // 关键：**先用登录响应把 user 覆盖掉，再发 /auth/me**。
+      // 以前这里是 setToken 之后直接 SET_USER(data.user)，顺序没错，但换了账号登录时
+      // `data.user` 里没有 is_root_admin，于是 UI 短暂把旧对象当自己 —— 「我」标签
+      // 贴到了别人的行上、编辑别人的抽屉被当成改自己而锁死。
+      // 先清空再写，宁可短暂显示空，也不显示上一个账号的身份。
+      commit('SET_USER', null)
       setToken(data.access_token, data.expires_in)
       // 记下角色，路由守卫下次刷新时能少发一次注定 403 的请求（见 utils/auth.js）
       setLastRole(data.user && data.user.role)

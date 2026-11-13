@@ -100,11 +100,15 @@ class UserBrief(BaseModel):
 class UserOut(BaseModel):
     """GET /auth/me 的响应。
 
-    四个字段，一个不多：password_hash、keycloak_sub、deleted_at 这类
-    内部列不出去。多返回一个字段不会让功能更好用，只会多一个泄露面。
+    只列必要字段：password_hash、keycloak_sub、deleted_at 这类内部列不出去。
+    多返回一个字段不会让功能更好用，只会多一个泄露面。
 
     V1.2 曾在这里返回 daily_ai_quota / ai_used_today（AI 每日调用额度），
     2026-11-10 按需求取消额度限制，两个字段一并删除 —— 不是藏起来，是不再存在。
+
+    V1.4 加 `is_root_admin`：管理后台要区分「第一级（根管理员）」和「第二级（普通管理员）」，
+    没有这个字段，前端就分不清自己能不能把别人设成管理员。
+    它只是**界面提示**，权限判定仍在后端 `permission.check_can_update`。
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -113,6 +117,7 @@ class UserOut(BaseModel):
     username: str
     nickname: str | None = None
     role: str
+    is_root_admin: bool = False
 
 
 class TokenOut(BaseModel):

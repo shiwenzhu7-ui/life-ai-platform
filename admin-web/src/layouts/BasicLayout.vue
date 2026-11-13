@@ -33,6 +33,13 @@
             <el-tag v-if="user && !isAdmin" size="mini" type="danger" class="layout__tag">
               {{ roleLabel }}
             </el-tag>
+            <!-- 管理员分两级，界面上要说清自己是哪一级：只有根管理员能授予管理员 -->
+            <el-tag v-else-if="isRootAdmin" size="mini" type="danger" class="layout__tag">
+              根管理员
+            </el-tag>
+            <el-tag v-else-if="user" size="mini" type="info" class="layout__tag">
+              管理员
+            </el-tag>
             <i class="el-icon-arrow-down layout__user-arrow" />
           </div>
           <el-dropdown-menu slot="dropdown">
@@ -69,7 +76,7 @@ export default {
   },
   computed: {
     ...mapState('user', ['user']),
-    ...mapGetters('user', ['displayName', 'isAdmin']),
+    ...mapGetters('user', ['displayName', 'isAdmin', 'isRootAdmin']),
 
     activeMenu() {
       return this.$route.path

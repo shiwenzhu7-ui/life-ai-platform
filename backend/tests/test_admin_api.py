@@ -287,35 +287,132 @@ def test_cannot_demote_last_admin(client, as_admin):
 
 
 def test_last_admin_guard_when_demoting_another(client, as_admin):
-    """只剩一个管理员时，别人不能把他降级（换个 admin 账号来操作）。
+    """管理员分级（V1.4）：根管理员不可被动，普通管理员只能动普通用户。
 
-    造一个第二管理员，然后删掉第一管理员之外的所有人，让库里只剩两个 admin；
-    再用第二个 admin 的身份去动第一个 —— 允许；之后只剩一个，再用同样方式就拦。
-    这里只验证「只剩一个时，降级唯一 admin 会 422」这条闸门。
+    旧规则「数一下还剩几个 admin，少于等于 1 就拦」已被分级取代：
+    现在真正保证「后台永远有人能进」的是「根管理员谁都动不了」这一条，
+    而不是数人头。本用例按新规则重写。
     """
+    root = as_admin  # 夹具里的 boss 是 id 最小的 admin → 自动成为根
     second = _make_user("boss2", role="admin")
 
-    # 两个管理员：互相降级应当允许
+    # 根管理员能把另一个管理员降级
     res = client.patch(f"{USERS}/{second}", json={"role": "user"})
     assert res.status_code == 200, res.text
 
-    # 现在只剩 boss 一个 admin；让 boss2（已被降级）来试，权限不够 403
+    # 降级之后他就不是管理员了，再发请求直接 403
     app.dependency_overrides[get_current_user_id] = lambda: second
-    res = client.patch(f"{USERS}/{as_admin}", json={"role": "user"})
+    res = client.patch(f"{USERS}/{root}", json={"role": "user"})
     assert res.status_code == 403, "降级后就不是管理员了"
 
-    # 换个真正的第二管理员，试图降级 boss —— 允许（此时有两个）
+    # 换一个普通管理员来动根管理员：422 ROOT_PROTECTED
     third = _make_user("boss3", role="admin")
     app.dependency_overrides[get_current_user_id] = lambda: third
-    res = client.patch(f"{USERS}/{as_admin}", json={"role": "user"})
+    res = client.patch(f"{USERS}/{root}", json={"role": "user"})
+    assert res.status_code == 422, res.text
+    assert res.json()["code"] == "ROOT_PROTECTED"
+    res = client.patch(f"{USERS}/{root}", json={"status": "disabled"})
+    assert res.status_code == 422, res.text
+    assert res.json()["code"] == "ROOT_PROTECTED"
+
+    # 根的自我保护：根自己也不能把自己降级或禁用
+    app.dependency_overrides[get_current_user_id] = lambda: root
+    res = client.patch(f"{USERS}/{root}", json={"role": "user"})
+    assert res.status_code == 422
+    assert "不能修改自己的角色" in res.json()["message"]
+    res = client.patch(f"{USERS}/{root}", json={"status": "disabled"})
+    assert res.status_code == 422
+    assert "不能禁用自己" in res.json()["message"]
+
+
+# ---------- 管理员分级（V1.4） ----------
+
+
+def test_root_can_grant_admin(client, as_admin):
+    """第一级能把别人设成管理员，也能再撤销。"""
+    user_id = _make_user("bob")
+
+    res = client.patch(f"{USERS}/{user_id}", json={"role": "admin"})
+    assert res.status_code == 200, res.text
+    assert res.json()["role"] == "admin"
+    assert res.json()["is_root_admin"] is False
+
+    res = client.patch(f"{USERS}/{user_id}", json={"role": "user"})
+    assert res.status_code == 200, res.text
+    assert res.json()["role"] == "user"
+
+
+def test_second_level_cannot_grant_admin(client, as_admin):
+    """第二级不能把别人设成管理员 —— 否则他就能靠"提人"抬高自己的圈子。"""
+    second = _make_user("boss2", role="admin")
+    bob = _make_user("bob")
+    app.dependency_overrides[get_current_user_id] = lambda: second
+
+    res = client.patch(f"{USERS}/{bob}", json={"role": "admin"})
+    assert res.status_code == 422, res.text
+    assert res.json()["code"] == "CANNOT_GRANT_ADMIN"
+
+
+def test_second_level_cannot_touch_other_admin(client, as_admin):
+    """第二级不能改任何管理员账号，连启用/禁用也不行。"""
+    second = _make_user("boss2", role="admin")
+    other = _make_user("boss3", role="admin")
+    app.dependency_overrides[get_current_user_id] = lambda: second
+
+    for body in ({"role": "user"}, {"status": "disabled"}, {"status": "active"}):
+        res = client.patch(f"{USERS}/{other}", json=body)
+        assert res.status_code == 422, (body, res.text)
+        assert res.json()["code"] == "CANNOT_TOUCH_ADMIN"
+
+
+def test_second_level_can_manage_normal_users(client, as_admin):
+    """第二级对普通用户 / VIP 有完整权限：改角色、禁用、启用。"""
+    second = _make_user("boss2", role="admin")
+    bob = _make_user("bob")
+    app.dependency_overrides[get_current_user_id] = lambda: second
+
+    res = client.patch(f"{USERS}/{bob}", json={"role": "vip"})
+    assert res.status_code == 200, res.text
+    res = client.patch(f"{USERS}/{bob}", json={"status": "disabled"})
+    assert res.status_code == 200, res.text
+    res = client.patch(f"{USERS}/{bob}", json={"status": "active", "role": "user"})
     assert res.status_code == 200, res.text
 
-    # 只删掉一个 admin 留一个：再降级就会被「最后一个管理员」拦住
-    with new_session() as s:
-        s.query(User).filter(User.id != third).delete()
-        s.commit()
-    # 最后一个 admin 不能改自己（两道闸门任意一道都会挡住它）
-    res = client.patch(f"{USERS}/{third}", json={"role": "user"})
+
+def test_root_flag_in_user_list_and_me(client, as_admin):
+    """列表和 /auth/me 都要标出谁是根，前端靠它锁按钮。"""
+    _make_user("boss2", role="admin")
+
+    res = client.get(USERS, params={"size": 100})
+    assert res.status_code == 200, res.text
+    roots = [item["username"] for item in res.json()["items"] if item["is_root_admin"]]
+    assert roots == ["boss"], roots
+    # boss2 也是 admin，但不是根
+    assert any(
+        item["username"] == "boss2" and item["role"] == "admin" and not item["is_root_admin"]
+        for item in res.json()["items"]
+    )
+
+    me = client.get(f"{API}/auth/me")
+    assert me.status_code == 200, me.text
+    assert me.json()["is_root_admin"] is True
+
+
+def test_config_can_pin_root_user(client, as_admin, monkeypatch):
+    """在 .env 里钉死 ADMIN_ROOT_USER_ID 后，判定跟着走，不再看 id 大小。"""
+    from core.config import settings
+
+    second = _make_user("boss2", role="admin")
+    monkeypatch.setattr(settings, "admin_root_user_id", second)
+
+    # 原根 boss 现在只是普通管理员：动不了新的根（ROOT_PROTECTED 优先于分级判断）
+    res = client.patch(f"{USERS}/{second}", json={"status": "disabled"})
+    assert res.status_code == 422, res.text
+    assert res.json()["code"] == "ROOT_PROTECTED"
+
+    # 新根也不能把自己降级
+    app.dependency_overrides[get_current_user_id] = lambda: second
+    res = client.patch(f"{USERS}/{second}", json={"role": "user"})
     assert res.status_code == 422
     assert "不能修改自己的角色" in res.json()["message"]
 

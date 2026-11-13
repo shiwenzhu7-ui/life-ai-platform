@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from core.db import get_db
 from core.deps import require_role
 from modules.adminweb.users import crud
+from modules.adminweb.users.permission import is_root, root_admin_id
 from modules.adminweb.users.schema import (
     ROLE_CATALOG,
     AdminRole,
@@ -44,11 +45,18 @@ def list_users(
     status: AdminStatus | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> Page[AdminUserOut]:
-    """所有用户，按注册时间倒序。`usage_count` 是累计 AI 调用次数。"""
+    """所有用户，按注册时间倒序。`usage_count` 是累计 AI 调用次数。
+
+    `is_root_admin` 标出第一级根管理员：前端据此锁住那一行的编辑按钮。
+    """
     rows, total = crud.list_users(
         db, page=page, size=size, keyword=keyword, role=role, status=status
     )
-    items = [AdminUserOut.from_model(user, usage_count=count) for user, count in rows]
+    root_id = root_admin_id(db)
+    items = [
+        AdminUserOut.from_model(user, usage_count=count, is_root=(user.id == root_id))
+        for user, count in rows
+    ]
     return Page.create(items, total, page, max(1, min(size, 100)))
 
 
@@ -61,21 +69,30 @@ def update_user(
 ) -> AdminUserOut:
     """改 `role` 或 `status`，两个字段至少要给一个。
 
+    分级规则（详见 `modules/adminweb/users/permission.py`）：
+
+        - 根管理员（库里 id 最小的 admin，或 .env 钉死的那个）谁都不能动
+        - 只有根管理员能把别人设为管理员，也只有他能改管理员
+        - 普通管理员只能改普通用户 / VIP
+        - 谁都不能改自己
+
     错误码：
 
         404  用户不存在
-        422  想把自己降级 / 禁用，或动了最后一个可用管理员
-        422  两个字段都没给
+        422  没有需要修改的字段 / 改自己 / 违反上面的分级规则
+             （`code` 细分：ROOT_PROTECTED、CANNOT_GRANT_ADMIN、CANNOT_TOUCH_ADMIN）
 
     为什么不开放改密码、改昵称：白名单只认 role 和 status。
     管理员替人改密码属于高风险操作，需要单独设计。
     """
     target = crud.get_user(db, user_id)
     updated = crud.update_user(
-        db, target, role=payload.role, status=payload.status, actor_id=actor.id
+        db, target, role=payload.role, status=payload.status, actor=actor
     )
     counts = crud.usage_counts(db)
-    return AdminUserOut.from_model(updated, usage_count=counts.get(updated.id, 0))
+    return AdminUserOut.from_model(
+        updated, usage_count=counts.get(updated.id, 0), is_root=is_root(db, updated)
+    )
 
 
 @router.get("/usage", response_model=UsagePageOut, summary="AI 调用明细")

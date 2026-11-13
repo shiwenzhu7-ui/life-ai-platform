@@ -44,12 +44,15 @@ ROLE_CATALOG: list[dict] = [
     {
         "role": "admin",
         "label": "管理员",
-        "summary": "唯一能进管理后台的角色。",
+        "summary": "能进管理后台的角色，内部还分两级：根管理员与普通管理员。",
         "abilities": [
-            "查看全部用户，改角色、启用/禁用账号",
-            "查看全站 AI 调用明细与合计",
-            "个人功能与普通用户相同",
-            "不能修改自己的角色，也不能禁用自己",
+            "查看全部用户、AI 调用明细与合计",
+            "【根管理员】第一级，全站只有一个，任何人都不能修改他",
+            "【根管理员】只有他能把别人设为管理员或撤销管理员",
+            "【普通管理员】第二级，由根管理员授予；只能改普通用户和 VIP",
+            "【普通管理员】不能碰管理员账号（不论哪一级），也不能再授予别人管理员",
+            "谁都不能修改自己的角色，也不能禁用自己",
+            "换根管理员只能在服务器上改库或 .env，后台界面没有这个口子",
         ],
     },
 ]
@@ -69,9 +72,12 @@ class AdminUserOut(BaseModel):
     last_login_at: datetime | None
     # 累计 AI 调用次数（ai_usage_logs 的行数），列表页顺手展示，省一次点开
     usage_count: int = 0
+    # 是不是「第一级」根管理员。前端据此把这一行的编辑按钮锁死 ——
+    # 真正的拦截在 permission.check_can_update，这里只是别让人点了才挨 422。
+    is_root_admin: bool = False
 
     @classmethod
-    def from_model(cls, user, *, usage_count: int = 0) -> "AdminUserOut":
+    def from_model(cls, user, *, usage_count: int = 0, is_root: bool = False) -> "AdminUserOut":
         return cls(
             id=user.id,
             username=user.username,
@@ -83,6 +89,7 @@ class AdminUserOut(BaseModel):
             created_at=user.created_at,
             last_login_at=user.last_login_at,
             usage_count=usage_count,
+            is_root_admin=is_root,
         )
 
 
