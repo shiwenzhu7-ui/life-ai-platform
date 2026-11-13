@@ -351,6 +351,23 @@ def test_second_level_cannot_grant_admin(client, as_admin):
     res = client.patch(f"{USERS}/{bob}", json={"role": "admin"})
     assert res.status_code == 422, res.text
     assert res.json()["code"] == "CANNOT_GRANT_ADMIN"
+    # 前端直接把这句话弹出来，不能是「参数校验失败」这种没信息量的兜底
+    assert "只有根管理员" in res.json()["message"]
+
+
+def test_second_level_cannot_revoke_admin(client, as_admin):
+    """第二级也不能把管理员**撤下来** —— 「不能授予」和「不能撤销」都要堵。
+
+    漏了撤销这一侧，普通管理员就能把别的管理员挑掉，等于间接改变管理员名单。
+    """
+    second = _make_user("boss2", role="admin")
+    victim = _make_user("boss3", role="admin")
+    app.dependency_overrides[get_current_user_id] = lambda: second
+
+    for body in ({"role": "user"}, {"role": "vip"}):
+        res = client.patch(f"{USERS}/{victim}", json=body)
+        assert res.status_code == 422, (body, res.text)
+        assert res.json()["code"] == "CANNOT_TOUCH_ADMIN", (body, res.text)
 
 
 def test_second_level_cannot_touch_other_admin(client, as_admin):
@@ -363,6 +380,21 @@ def test_second_level_cannot_touch_other_admin(client, as_admin):
         res = client.patch(f"{USERS}/{other}", json=body)
         assert res.status_code == 422, (body, res.text)
         assert res.json()["code"] == "CANNOT_TOUCH_ADMIN"
+
+
+def test_second_level_switches_between_user_and_vip(client, as_admin):
+    """第二级的本职：普通用户 ↔ VIP 来回改，两边都要通。"""
+    second = _make_user("boss2", role="admin")
+    bob = _make_user("bob")
+    app.dependency_overrides[get_current_user_id] = lambda: second
+
+    res = client.patch(f"{USERS}/{bob}", json={"role": "vip"})
+    assert res.status_code == 200, res.text
+    assert res.json()["role"] == "vip"
+
+    res = client.patch(f"{USERS}/{bob}", json={"role": "user"})
+    assert res.status_code == 200, res.text
+    assert res.json()["role"] == "user"
 
 
 def test_second_level_can_manage_normal_users(client, as_admin):

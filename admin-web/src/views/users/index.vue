@@ -182,7 +182,7 @@
               这是根管理员，任何人都不能修改，包括角色和状态
             </p>
             <p v-else-if="adminOptionDisabled" class="users__drawer-tip">
-              只有根管理员可以把别人设为管理员
+              只有根管理员可以把别人设为管理员；你只能在普通用户和 VIP 之间调整
             </p>
           </el-form-item>
 

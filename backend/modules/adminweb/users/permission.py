@@ -4,12 +4,12 @@
 区别不在 role 字段上，而在「这个 admin 是不是根管理员」：
 
     第零级  服务器 / .env          —— 能设根管理员（改库、改配置），不在后台界面里
-    第一级  根管理员（root）        —— 唯一能授予/撤销 admin 的人；自己不可被任何人改动
-    第二级  普通管理员（admin）     —— 能改普通用户的角色、启用/禁用，但：
+    第一级  根管理员（root）        —— 能改任何人的任何身份；自己不可被任何人改动
+    第二级  普通管理员（admin）     —— **只能在普通用户和 VIP 之间来回改**，外加启用/禁用；但：
 
 - 不能碰根管理员（`ROOT_PROTECTED`）
 - 不能把别人提成 admin（`CANNOT_GRANT_ADMIN`：只有根管理员能授予）
-- 不能改管理员（无论哪一级），包括启用/禁用（`CANNOT_TOUCH_ADMIN`）
+- 不能改管理员（无论哪一级），包括撤销他的 admin、启用/禁用（`CANNOT_TOUCH_ADMIN`）
 
 根管理员是谁：`settings.admin_root_user_id` 配了就用它；没配就取 users 表里
 **id 最小的 role=admin**。后者让「老库里只有 demo 一个 admin」这个现状天然成立，
@@ -72,11 +72,15 @@ def check_can_update(db: Session, *, actor: User, target: User, role: str | None
     if actor_is_root:
         return
 
-    # 2) 以下都是「普通管理员」的限制
+    # 2) 以下是「普通管理员」的限制。他对普通用户和 VIP 有完整权限
+    #    （user ↔ vip 互转、启用/禁用），但完全不碰管理员这一层。
     if target.role == ADMIN:
-        raise validation_error("只有根管理员可以修改管理员账号", code="CANNOT_TOUCH_ADMIN")
+        raise validation_error(
+            "只有根管理员可以修改管理员账号", code="CANNOT_TOUCH_ADMIN"
+        )
 
     if role == ADMIN:
         raise validation_error(
-            "只有根管理员可以把别人设为管理员", code="CANNOT_GRANT_ADMIN"
+            "只有根管理员可以把别人设为管理员；你只能在普通用户和 VIP 之间调整",
+            code="CANNOT_GRANT_ADMIN",
         )

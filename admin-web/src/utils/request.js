@@ -48,8 +48,21 @@ function buildValidationMessage(body) {
     .join('；')
 }
 
+// 422 有两种来源，结构不一样，以前只认第一种，于是业务拒绝全被笼统成「参数校验失败」：
+//
+//   ① FastAPI/Pydantic 校验失败   body = {detail: {errors: [{loc, msg, type}]}}
+//      —— 没有 message 字段，要自己从 errors 拼。
+//   ② 后端的业务拒绝（AppError）  body = {code, message, detail}，例如
+//      {code: "CANNOT_GRANT_ADMIN", message: "只有根管理员可以把别人设为管理员"}
+//      —— 后端已经写好了给人看的中文，直接用，别再盖一层「参数校验失败」。
+//
+// 所以顺序是：先看 body.message（业务原话），再按 Pydantic 的 errors 拼，
+// 两者都没有才退回笼统文案。
 function pickMessage(status, body) {
-  if (status === 422) return buildValidationMessage(body) || '参数校验失败'
+  if (status === 422) {
+    if (body && body.message) return body.message
+    return buildValidationMessage(body) || '参数校验失败'
+  }
   // 登录接口的 401 是「密码错了」，不是「登录过期」—— 这里必须先分
   if (status === 401) {
     if (body && body.message) return body.message
