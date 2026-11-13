@@ -87,7 +87,13 @@ class LoginIn(BaseModel):
 
 
 class UserBrief(BaseModel):
-    """注册响应 / 登录响应里的用户摘要（文档 §3 的字段）。"""
+    """注册响应 / 登录响应里的用户摘要（文档 §3 的字段）。
+
+    V1.4 加 `is_root_admin`：登录响应和 `/auth/me` 必须**同形**。
+    之前只有 `/auth/me` 带它，前端 `SET_USER(login 响应)` 之后就拿到一个
+    缺字段的对象 —— 根管理员登进来也会被当成「不是根」，管理员单选项一直是灰的，
+    要等 `fetchMe` 回来才恢复。这种「同一份数据两个形状」的坑不该留。
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -95,6 +101,7 @@ class UserBrief(BaseModel):
     username: str
     nickname: str | None = None
     role: str
+    is_root_admin: bool = False
 
 
 class UserOut(BaseModel):

@@ -431,10 +431,16 @@ export default {
       return Boolean(row && row.is_root_admin)
     },
 
-    // 我是不是根管理员（能不能授予/撤销管理员）
+    // 我是不是根管理员。登录响应和 /auth/me 都带 is_root_admin（后端 V1.4 起同形），
+// 但 fetchMe 还没回来、或接口失败时 state 里可能没有这个字段。
+    // 兜底：全站只有一个根，列表里那一行的 is_root_admin 是权威的，
+    // 用它反查「我叫不叫那个名字」比直接信 state 更稳。
     iAmRoot() {
       const me = this.$store.state.user.user
-      return Boolean(me && me.is_root_admin)
+      if (!me) return false
+      if (typeof me.is_root_admin === 'boolean') return me.is_root_admin
+      const rootRow = this.rows.find((row) => row.is_root_admin)
+      return Boolean(rootRow && rootRow.id === me.id)
     },
 
     // 这一行我能不能动。规则和后端 permission.check_can_update 一一对应，

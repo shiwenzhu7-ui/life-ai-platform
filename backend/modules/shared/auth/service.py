@@ -17,6 +17,7 @@ from core.config import settings
 from core.errors import conflict, unauthorized, validation_error
 from core.security import create_access_token, hash_password, verify_password
 from core.time import now_utc
+from modules.adminweb.users.permission import is_root
 from modules.shared.auth.schema import LoginIn, RegisterIn, TokenOut, UserBrief, UserOut
 from modules.shared.users.model import User
 
@@ -76,7 +77,15 @@ def login(db: Session, data: LoginIn) -> TokenOut:
     return TokenOut(
         access_token=token,
         expires_in=settings.jwt_expire_minutes * 60,
-        user=UserBrief.model_validate(user),
+        user=UserBrief(
+            id=user.id,
+            username=user.username,
+            nickname=user.nickname,
+            role=user.role,
+            # 登录响应必须自带 is_root_admin，不能只靠随后的 /auth/me 补 ——
+            # 前端拿登录响应直接 SET_USER，缺这个字段时根管理员会被当成普通管理员
+            is_root_admin=is_root(db, user),
+        ),
     )
 
 
@@ -89,8 +98,6 @@ def me(db: Session, user: User) -> UserOut:
     V1.4 为了返回 `is_root_admin` 又碰了一次库：根管理员可能是「id 最小的 admin」
     （随库变化），不能只凭 JWT 里的 role 判断。只走一次按 id 排序的 limit 1 查询。
     """
-    from modules.adminweb.users.permission import is_root
-
     return UserOut(
         id=user.id,
         username=user.username,
