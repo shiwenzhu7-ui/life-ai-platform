@@ -6,14 +6,15 @@
 本端所有接口都以 `/admin` 开头，并且要求 role=admin。
 权限靠后端的 require_role("admin") 拦，前端路由守卫只是体验。
 
-V1.2 计划放的模块：users（用户管理）/ roles（角色说明）
-V1.4 再补：logs / stats / ai_configs / public_documents
+V1.4 已落地的模块：users（用户管理 + AI 调用明细）
+后续再补：configs（AI 模型配置）/ public_documents
 """
 
 from fastapi import APIRouter
 
+from modules.adminweb.users.router import router as admin_users_router
+
 router = APIRouter()
 
-# ---------- 用户管理（V1.2） ----------
-# from modules.adminweb.users.router import router as admin_users_router
-# router.include_router(admin_users_router)
+# ---------- 用户管理（V1.4）：/admin/users + /admin/usage ----------
+router.include_router(admin_users_router)
