@@ -261,9 +261,9 @@ operation_logs       操作日志（本期不建）
 life-ai-platform/
 ├── backend/                 FastAPI 后端
 │   └── app/
-├── life-web/                生活管理端
-├── analytics-web/           数据分析端
-├── admin-web/               系统管理后台
+├── life-web/                生活管理端（8080）
+├── analytics-web/           数据分析端（8081，未开工）
+├── admin-web/               系统管理后台（8082）
 ├── keycloak/                Realm 和 Client 配置
 ├── deploy/                  Docker、Nginx 和部署配置
 ├── 需求规格说明书.md         完整需求报告
@@ -336,13 +336,13 @@ life-ai-platform/
 - 使用本地 `bge-small-zh-v1.5`（fastembed / ONNX）生成向量。
 - ~~通过 `langchain-milvus` 写入~~ → 实际用 `pymilvus` 直接写入集合 `kb_chunks`。
 - 检索时按 `user_id` 过滤（集合里只存 `id` / 向量 / `user_id` / `document_id`）。
-- 回答中展示文档名称和引用片段（含页码）—— 后端已返回 `references`，前端来源卡片待做。
+- 回答中展示文档名称和引用片段（含页码）。
 - 删除文档时同步清理 MySQL（硬删）、文件和 Milvus 数据。
 
 完成标准：用户可以上传资料并基于自己的文档提问，系统能够返回带来源的答案，且不能检索其他用户的数据。
 
-**状态**：后端已完成（4 个 `/knowledge` 接口 + `search_personal_documents` 工具 + `references`），
-前端 `/knowledge` 页面与对话页的来源卡片尚未开工。
+**状态**：已完成。后端 4 个 `/knowledge` 接口 + 第 9 个工具 `search_personal_documents` + `references` 落库；
+前端 `/knowledge` 页面（上传、状态轮询、切块预览、删除）与对话页的来源卡片均已上线。
 
 ### V1.4 数据分析与完善版
 
@@ -356,6 +356,29 @@ life-ai-platform/
 - 补充单元测试和接口测试。
 
 完成标准：核心生活模块形成闭环，统计图表和周期报告能够根据真实数据生成。
+
+**状态**：进行中。已完成购物清单（前后端 + 第 10 个工具 `add_shopping_item`）与管理后台后端
+（`/admin/users`、`/admin/usage`、`/admin/roles`）；`admin-web` 的登录、「用户管理」、「AI 调用明细」、「角色说明」
+四页与 403 页已全部可用。饮食 / 运动 / 睡眠 / 心情 / 日记模块与 ECharts 图表未开工。
+
+#### 管理后台 `admin-web`（8082）
+
+| 页面 | 状态 |
+|---|---|
+| 登录 | 已完成，复用 `/auth/login`，只保留登录 tab（无注册）；密码错时弹后端原话「用户名或密码错误」 |
+| `/users` 用户管理 | 已完成：角色 / 状态 / 关键词筛选、分页（10/20/50）、行内「编辑」抽屉（改角色、启用禁用，二次确认） |
+| `/roles` 角色说明 | 已完成：三张卡片读 `GET /admin/roles`，文案全部来自后端，前端不留常量 |
+| `/usage` AI 调用明细 | 已完成：四张合计卡（次数 / 输入 / 输出 / 费用）、今天 / 昨天 / 近 7 天 / 近 30 天 / 全部与自定义区间、状态与用户筛选、分页（10/20/50/100） |
+| `/403` 无权访问 | 已完成：非管理员落地页，给「换个账号」「去生活助手」两个出口 |
+
+路由守卫按角色放行：判据顺序为 Vuex `user.role` → localStorage 上次登录角色 → 先放行等 `/auth/me` 回来再纠正，
+非管理员访问后台页面跳 `/403`。前端守卫只管体验，真正的权限在后端 `require_role("admin")`。
+
+后端的护栏前端不重复实现：改自己被拒、降级或禁用最后一个可用管理员被拒，都由后端返回 `422`
+（不是 `docs/页面设计.md` 里写的 409），前端把原文原样弹出。
+
+管理员判定完全在后端：整个 `/admin` 路由组挂 `require_role("admin")`，非管理员访问得到 `403 FORBIDDEN`。
+前端只是把 403 翻译成一句人话，并在顶栏标出当前角色 —— 隐藏按钮不是安全边界。
 
 ### V2.0 Keycloak SSO 最终版
 
@@ -414,9 +437,9 @@ LangChain、JWT、Milvus RAG 和 Keycloak 分别在后续版本加入，不作�
 
 ### 版本进度
 
-- [ ] V1.0 基础生活管理版
-- [ ] V1.1 LangChain 智能助手版
-- [ ] V1.2 JWT 用户系统版
-- [ ] V1.3 Milvus RAG 个人知识库版（后端 ✅ / 前端 `/knowledge` 页面待做）
-- [ ] V1.4 数据分析与完善版
+- [x] V1.0 基础生活管理版
+- [x] V1.1 LangChain 智能助手版（10 个工具全部落地）
+- [x] V1.2 JWT 用户系统版
+- [x] V1.3 Milvus RAG 个人知识库版
+- [ ] V1.4 数据分析与完善版（购物已完成 / 管理后台后端 + admin-web 四页已完成 / 生活记录、日记、ECharts 待做）
 - [ ] V2.0 Keycloak SSO 最终版
