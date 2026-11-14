@@ -30,6 +30,15 @@ const SSO_ERROR_TEXT = {
 
 const FALLBACK_TEXT = '登录失败，请重试或改用账号密码登录'
 
+// 这些码**不算错误**，不能让用户看到红字：
+//   sso_silent —— 静默探测发现账号中心那边没登着，正常情况，显示密码框就行
+//   unconfigured —— 后端还没配 SSO，本地账号密码登录完全可用
+const QUIET_CODES = ['sso_silent', 'unconfigured']
+
+export function isQuietSsoError(code) {
+  return QUIET_CODES.indexOf(code) !== -1
+}
+
 // sso_error 机器码 → 用户看得懂的一句话。未知码也要给兜底文案，不能弹个空消息。
 export function ssoErrorText(code) {
   if (!code) return FALLBACK_TEXT
@@ -49,9 +58,44 @@ export function safeNextPath(raw, fallback = '/users') {
 
 // 跳到后端发起 SSO。注意是 window.location 整页跳转：
 // Keycloak 要接管整个浏览器，用 axios 或 router.push 都做不到。
-export function redirectToSsoLogin(nextPath = '/') {
+//
+// silent=true 时带 prompt=none（OIDC 静默认证）：Keycloak 绝不弹登录框，
+// 已经登着就把 code 发回来（用户感觉是「秒进」），没登着就回 sso_error=sso_silent。
+// 这是「A 应用登录过，打开 B 应用直接进去」的实现方式。
+export function redirectToSsoLogin(nextPath = '/', silent = false) {
   const base = process.env.VUE_APP_API_BASE || '/api/v1'
   const params = [`app=${encodeURIComponent(APP_NAME)}`]
   if (nextPath && nextPath !== '/') params.push(`next=${encodeURIComponent(nextPath)}`)
+  if (silent) params.push('silent=true')
   window.location.href = `${base}/auth/sso/login?${params.join('&')}`
+}
+
+// 静默探测只试一次：不试的话每次打开登录页都要多跳一转；
+// 试了不防重复的话，账号中心没登着时会被无限弹回来（/login → sso → /login → …）。
+// 用 sessionStorage 而不是 localStorage：同一标签页里只认第一次，
+// 用户手动回来登录时还能再探一次，但也不会被记到下次开浏览器。
+const SILENT_TRIED_KEY = 'lifeai_sso_silent_tried'
+
+export function markSilentTried() {
+  try {
+    window.sessionStorage.setItem(SILENT_TRIED_KEY, '1')
+  } catch (e) {
+    // 隐私模式禁用 storage 就退化成「每个人手工点按钮」，不影响正确性
+  }
+}
+
+export function clearSilentTried() {
+  try {
+    window.sessionStorage.removeItem(SILENT_TRIED_KEY)
+  } catch (e) {
+    // 同上
+  }
+}
+
+export function silentAlreadyTried() {
+  try {
+    return window.sessionStorage.getItem(SILENT_TRIED_KEY) === '1'
+  } catch (e) {
+    return false
+  }
 }

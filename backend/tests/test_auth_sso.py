@@ -113,7 +113,14 @@ def make_id_token(
 
 
 def put_state_cookie(
-    client, *, app="life-web", state="s1", verifier="v1", nonce="n1", next_path=""
+    client,
+    *,
+    app="life-web",
+    state="s1",
+    verifier="v1",
+    nonce="n1",
+    next_path="",
+    silent=False,
 ) -> str:
     """生成一次性票据并**以 Cookie 头的形式**带给回调。
 
@@ -123,7 +130,12 @@ def put_state_cookie(
     排查起来极费时间。直接拼 header 最贴近浏览器的真实行为，也最不容易误判。
     """
     value = sso_state.issue(
-        app=app, state=state, code_verifier=verifier, nonce=nonce, next_path=next_path
+        app=app,
+        state=state,
+        code_verifier=verifier,
+        nonce=nonce,
+        next_path=next_path,
+        silent=silent,
     )
     return {settings.oidc_cookie_name: value}
 
@@ -264,6 +276,69 @@ def test_callback_when_user_cancels_at_keycloak(client, sso_env):
     jar = put_state_cookie(client)
     res = client.get(f"{SSO_CALLBACK}?error=access_denied&state=s1", cookies=jar, follow_redirects=False)
     assert parse_redirect(res)["q"]["sso_error"] == "access_denied"
+
+
+# ---------- 4. 静默探测（prompt=none）----------
+#
+# 前端打开登录页时会先静默问一次账号中心（redirectToSsoLogin(next, true)）：
+#   已登着 → 直接拿 code 回来，用户看不到任何登录框（单点登录的效果）
+#   没登着 → Keycloak 回 error=login_required，前端不该弹红字，只显示本地表单
+
+
+def test_sso_login_silent_adds_prompt_none(client, sso_env):
+    res = client.get(f"{SSO_LOGIN}?silent=true", follow_redirects=False)
+    assert res.status_code == 302
+    q = {k: v[0] for k, v in parse_qs(urlparse(res.headers["location"]).query).items()}
+    assert q["prompt"] == "none"
+
+
+def test_sso_login_interactive_has_no_prompt(client, sso_env):
+    """交互式登录绝不能带 prompt=none —— 带了就永远弹不出登录框，谁都登不进来。"""
+    res = client.get(SSO_LOGIN, follow_redirects=False)
+    q = {k: v[0] for k, v in parse_qs(urlparse(res.headers["location"]).query).items()}
+    assert "prompt" not in q
+
+
+def test_callback_silent_login_required_becomes_sso_silent(client, sso_env):
+    jar = put_state_cookie(client, silent=True)
+    res = client.get(
+        f"{SSO_CALLBACK}?error=login_required&state=s1", cookies=jar, follow_redirects=False
+    )
+    assert parse_redirect(res)["q"]["sso_error"] == "sso_silent"
+
+
+def test_callback_interactive_login_required_is_not_silent(client, sso_env):
+    """非静默票据收到 login_required 说明 Keycloak 出了怪事，按错误上报，不能吞成安静返回。"""
+    jar = put_state_cookie(client, silent=False)
+    res = client.get(
+        f"{SSO_CALLBACK}?error=login_required&state=s1", cookies=jar, follow_redirects=False
+    )
+    assert parse_redirect(res)["q"]["sso_error"] == "sso_denied"
+
+
+def test_callback_silent_cancel_still_reports_access_denied(client, sso_env):
+    """静默探测下 Keycloak 也可能回 access_denied，那是真的被拒，不能当「没登录」处理。"""
+    jar = put_state_cookie(client, silent=True)
+    res = client.get(
+        f"{SSO_CALLBACK}?error=access_denied&state=s1", cookies=jar, follow_redirects=False
+    )
+    assert parse_redirect(res)["q"]["sso_error"] == "access_denied"
+
+
+def test_callback_silent_success_is_identical_to_interactive(
+    client, sso_env, fake_keycloak, monkeypatch, db, ks_key
+):
+    """静默探测成功时走的是同一条换令牌的路 —— 用户拿到的本地 JWT 没有任何区别。"""
+    id_token = make_id_token(ks_key, nonce="n1", username="sso_silent_ok")
+    monkeypatch.setattr(oidc, "exchange_code", lambda **_: {"id_token": id_token})
+
+    jar = put_state_cookie(client, silent=True, next_path="/tasks")
+    res = client.get(f"{SSO_CALLBACK}?code=abc&state=s1", cookies=jar, follow_redirects=False)
+    q = parse_redirect(res)["q"]
+    assert "sso_error" not in q
+    assert q["next"] == "/tasks"
+    user = db.query(User).filter(User.username == "sso_silent_ok").one()
+    assert decode_token(q["token"]) == user.id
 
 
 def test_callback_when_exchange_rejected(client, sso_env, monkeypatch, db):

@@ -114,7 +114,9 @@ def code_challenge_of(verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
-def build_authorize_url(*, app: str, state: str, nonce: str, code_verifier: str) -> str:
+def build_authorize_url(
+    *, app: str, state: str, nonce: str, code_verifier: str, prompt: str = ""
+) -> str:
     """拼出浏览器要跳转的授权页地址。
 
     scope 只要 openid 三件套：
@@ -125,6 +127,10 @@ def build_authorize_url(*, app: str, state: str, nonce: str, code_verifier: str)
 
     client_id 与 redirect_uri 都按 app 取：life-web 和 admin-web 在 Keycloak 里
     是两个客户端，各自的「有效的重定向URI」也不同，混用会被 Keycloak 拒。
+
+    prompt="none" 是 OIDC 的**静默认证**：Keycloak 绝不弹登录框，只回答
+    「这人现在还登着吗」。登着就按正常流程回 code，没登着就直接回
+    error=login_required。前端用它来判断「要不要自动进去」。
     """
     client_id, _ = client_credentials(app)
     params = {
@@ -137,6 +143,8 @@ def build_authorize_url(*, app: str, state: str, nonce: str, code_verifier: str)
         "code_challenge": code_challenge_of(code_verifier),
         "code_challenge_method": "S256",
     }
+    if prompt:
+        params["prompt"] = prompt
     return f"{_endpoint('/auth')}?{urlencode(params)}"
 
 

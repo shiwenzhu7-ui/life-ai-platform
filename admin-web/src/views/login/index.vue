@@ -1,59 +1,68 @@
 <template>
   <div class="login">
     <div class="login__card">
-      <div class="login__brand">
-        <span class="login__brand-text">LifeAI 管理后台</span>
-        <span class="login__brand-sub">仅限管理员账号</span>
+      <!-- 静默探测账号中心的那一两秒：不闪表单，给个「正在进入」 -->
+      <div v-if="autoChecking" class="login__auto">
+        <i class="el-icon-loading login__auto-icon" />
+        <p class="login__auto-text">正在通过账号中心登录…</p>
+        <el-button type="text" @click="stopAutoCheck">改用账号密码登录</el-button>
       </div>
 
-      <el-form
-        ref="loginForm"
-        :model="form"
-        :rules="rules"
-        label-position="top"
-        @submit.native.prevent="onLogin"
-      >
-        <el-form-item label="用户名" prop="username">
-          <el-input
-            v-model="form.username"
-            autocomplete="username"
-            placeholder="管理员账号"
-            prefix-icon="el-icon-user"
-          />
-        </el-form-item>
+      <template v-else>
+        <div class="login__brand">
+          <span class="login__brand-text">LifeAI 管理后台</span>
+          <span class="login__brand-sub">仅限管理员账号</span>
+        </div>
 
-        <el-form-item label="密码" prop="password">
-          <el-input
-            v-model="form.password"
-            type="password"
-            autocomplete="current-password"
-            show-password
-            placeholder="密码"
-            prefix-icon="el-icon-lock"
-            @keyup.enter.native="onLogin"
-          />
-        </el-form-item>
+        <el-form
+          ref="loginForm"
+          :model="form"
+          :rules="rules"
+          label-position="top"
+          @submit.native.prevent="onLogin"
+        >
+          <el-form-item label="用户名" prop="username">
+            <el-input
+              v-model="form.username"
+              autocomplete="username"
+              placeholder="管理员账号"
+              prefix-icon="el-icon-user"
+            />
+          </el-form-item>
+
+          <el-form-item label="密码" prop="password">
+            <el-input
+              v-model="form.password"
+              type="password"
+              autocomplete="current-password"
+              show-password
+              placeholder="密码"
+              prefix-icon="el-icon-lock"
+              @keyup.enter.native="onLogin"
+            />
+          </el-form-item>
+
+          <el-button
+            type="primary"
+            class="login__submit"
+            :loading="submitting"
+            @click="onLogin"
+          >登 录</el-button>
+        </el-form>
+
+        <el-divider class="login__divider">或者</el-divider>
 
         <el-button
-          type="primary"
-          class="login__submit"
-          :loading="submitting"
-          @click="onLogin"
-        >登 录</el-button>
-      </el-form>
+          class="login__sso"
+          icon="el-icon-key"
+          @click="onSsoLogin"
+        >用账号中心登录</el-button>
 
-      <el-divider class="login__divider">或者</el-divider>
-
-      <el-button
-        class="login__sso"
-        icon="el-icon-key"
-        @click="onSsoLogin"
-      >用账号中心登录</el-button>
-
-      <p class="login__hint">
-        这里没有注册入口。普通用户请去
-        <a href="http://localhost:8080/login" class="login__link">LifeAI 主站</a>。
-      </p>
+        <p class="login__hint">
+          这里没有注册入口。普通用户请去
+          <a href="http://localhost:8080/login" class="login__link">LifeAI 主站</a>。
+        </p>
+      </template>
     </div>
   </div>
 </template>
@@ -74,7 +83,20 @@
 // Keycloak 那边验完人，后端签一个**和账号密码登录一模一样的本地 JWT**，
 // 浏览器被送回 /sso/callback，由 views/sso/Callback.vue 落令牌。
 // 所以本文件不碰令牌、不碰 axios —— 只负责把浏览器交出去。
-import { redirectToSsoLogin, ssoErrorText } from '@/utils/sso'
+//
+// **进页面先静默问一次账号中心**（prompt=none）：
+//   账号中心那边已经登着（比如刚在 life-web 登过）→ 不弹密码框、不弹红字，
+//   直接换令牌进后台，用户感觉是「打开就进去了」。这就是单点登录的效果。
+//   没登着 → 回 sso_error=sso_silent，安静地显示本地表单，不打扰任何人。
+// 只试一次（sessionStorage 记着），否则「没登着 → 弹回 /login → 又试 → …」会死循环。
+import {
+  clearSilentTried,
+  isQuietSsoError,
+  markSilentTried,
+  redirectToSsoLogin,
+  silentAlreadyTried,
+  ssoErrorText
+} from '@/utils/sso'
 
 export default {
   name: 'AdminLoginView',
@@ -82,6 +104,8 @@ export default {
   data() {
     return {
       submitting: false,
+      // 正在等静默探测 / 正在换令牌，这段时间显示「正在进入…」而不是表单
+      autoChecking: false,
       // 账号中心跳回来失败时带回的 next，优先于 query.redirect
       redirectFallback: '',
       form: {
@@ -104,10 +128,24 @@ export default {
   },
 
   created() {
-    // 账号中心失败时会 302 到 /login?sso_error=xxx&next=...，这里翻译成中文弹出来
     const { sso_error: ssoError, next } = this.$route.query
     if (typeof next === 'string' && this.pickTarget(next)) this.redirectFallback = next
-    if (ssoError) this.$message.error(ssoErrorText(ssoError))
+
+    if (ssoError) {
+      // 账号中心的静默探测已经试过了，这次显示表单等用户自己动手
+      clearSilentTried()
+      // 静默探测没登着、或后端没配 SSO，都不该弹红字
+      if (!isQuietSsoError(ssoError)) this.$message.error(ssoErrorText(ssoError))
+      return
+    }
+
+    // 刚点「用账号中心登录」回来失败（比如 state 过期）也走上面那条分支；
+    // 只有「第一次打开这一页」才自动探测。
+    if (!silentAlreadyTried()) {
+      this.autoChecking = true
+      markSilentTried()
+      redirectToSsoLogin(this.redirectTarget, true)
+    }
   },
 
   methods: {
@@ -149,6 +187,11 @@ export default {
     // 整页跳走，不走 axios：Keycloak 要接管整个浏览器
     onSsoLogin() {
       redirectToSsoLogin(this.redirectTarget)
+    },
+
+    // 静默探测时用户等不及，点「改用账号密码登录」：停掉转圈直接给表单
+    stopAutoCheck() {
+      this.autoChecking = false
     }
   }
 }
@@ -207,6 +250,24 @@ export default {
 
   &__sso {
     width: 100%;
+  }
+
+  &__auto {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 36px 0 32px;
+  }
+
+  &__auto-icon {
+    font-size: 30px;
+    color: #409eff;
+  }
+
+  &__auto-text {
+    margin: 14px 0 6px;
+    font-size: 14px;
+    color: #606266;
   }
 
   &__hint {

@@ -1,5 +1,6 @@
 import { login, logout, me } from '@/api/admin'
 import { clearToken, getToken, hasValidToken, setLastRole, setToken } from '@/utils/auth'
+import { clearSilentTried } from '@/utils/sso'
 
 // 登录态。三件事：令牌、当前用户、登录/登出动作。
 //
@@ -109,6 +110,9 @@ export default {
       }
       clearToken()
       commit('CLEAR')
+      // 退出后允许登录页再静默探一次账号中心（见 utils/sso.js）：
+      // 不给自己留后路的「已探过」标记会让换账号登录的人被挡在 SSO 外面。
+      clearSilentTried()
     }
   }
 }

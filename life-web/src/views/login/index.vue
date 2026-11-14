@@ -1,6 +1,14 @@
 <template>
   <div class="login">
     <div class="login__card">
+      <!-- 静默探测账号中心的那一两秒：不闪表单，给个「正在进入」 -->
+      <div v-if="autoChecking" class="login__auto">
+        <i class="el-icon-loading login__auto-icon" />
+        <p class="login__auto-text">正在通过账号中心登录…</p>
+        <el-button type="text" @click="stopAutoCheck">改用账号密码登录</el-button>
+      </div>
+
+      <template v-else>
       <div class="login__brand">
         <span class="login__brand-text">LifeAI</span>
         <span class="login__brand-sub">智能生活管理</span>
@@ -123,6 +131,7 @@
           </p>
         </el-tab-pane>
       </el-tabs>
+      </template>
     </div>
   </div>
 </template>
@@ -138,7 +147,20 @@
 //      前端不复制后端的规则 —— 复制了就会漂移。
 
 // 与后端 schema.py 的 _USERNAME_RE 一致：出错时看到的规则和真正执行的规则要一样。
-import { redirectToSsoLogin, ssoErrorText } from '@/utils/sso'
+//
+// **进页面先静默问一次账号中心**（prompt=none）：
+//   账号中心那边已经登着（比如刚在 admin-web 登过）→ 不弹密码框、不弹红字，
+//   直接换令牌进首页，用户感觉是「打开就进去了」。
+//   没登着 → 回 sso_error=sso_silent，安静地显示本地表单，不打扰任何人。
+// 只试一次（sessionStorage 记着），否则「没登着 → 弹回 /login → 又试 → …」会死循环。
+import {
+  clearSilentTried,
+  isQuietSsoError,
+  markSilentTried,
+  redirectToSsoLogin,
+  silentAlreadyTried,
+  ssoErrorText
+} from '@/utils/sso'
 
 const USERNAME_RE = /^[A-Za-z0-9_]{3,50}$/
 // bcrypt 只认 72 字节，代码里按 UTF-8 字节算（24 个汉字 = 72 字节）
@@ -164,6 +186,8 @@ export default {
     return {
       tab: 'login',
       submitting: false,
+      // 正在等静默探测 / 正在换令牌，这段时间显示「正在进入…」而不是表单
+      autoChecking: false,
       // SSO 失败回跳时带的 next（见 computed.redirectTarget）
       redirectFallback: '',
 
@@ -254,10 +278,28 @@ export default {
     }
     // 后端 /auth/sso/callback 出错时 302 到 ?sso_error=xxx（见 utils/sso.js 的翻译表）
     const ssoError = this.$route.query.sso_error
-    if (ssoError) this.$message.error(ssoErrorText(ssoError))
+    if (ssoError) {
+      // 账号中心的静默探测已经试过了，这次显示表单等用户自己动手
+      clearSilentTried()
+      // 静默探测没登着、或后端没配 SSO，都不该弹红字
+      if (!isQuietSsoError(ssoError)) this.$message.error(ssoErrorText(ssoError))
+      return
+    }
+    // 用户主动要来注册页，就别把人拽去账号中心
+    if (this.tab === 'register') return
+    // 只有「第一次打开这一页」才自动探测
+    if (!silentAlreadyTried()) {
+      this.autoChecking = true
+      markSilentTried()
+      redirectToSsoLogin(this.redirectTarget, true)
+    }
   },
 
   methods: {
+    // 静默探测时用户等不及，点「改用账号密码登录」：停掉转圈直接给表单
+    stopAutoCheck() {
+      this.autoChecking = false
+    },
     validate(formRef) {
       const form = this.$refs[formRef]
       if (!form) return Promise.resolve(false)
@@ -396,6 +438,24 @@ export default {
 
   &__sso {
     width: 100%;
+  }
+
+  &__auto {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 44px 0 40px;
+  }
+
+  &__auto-icon {
+    font-size: 30px;
+    color: #409eff;
+  }
+
+  &__auto-text {
+    margin: 14px 0 6px;
+    font-size: 14px;
+    color: #606266;
   }
 
   &__hint {

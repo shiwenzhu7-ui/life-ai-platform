@@ -3,6 +3,7 @@ import VueRouter from 'vue-router'
 
 import store from '@/store'
 import { getLastRole, hasValidToken } from '@/utils/auth'
+import { clearSilentTried } from '@/utils/sso'
 
 Vue.use(VueRouter)
 
@@ -95,6 +96,10 @@ router.beforeEach((to, from, next) => {
     // 非管理员也能重登（换管理员账号或走账号中心），所以不再拦 —— 原先这里
     // 只放 admin 走，二级/普通用户点「重新登录」会被无故弹回后台页。
     if (to.path === '/login' && loggedIn && knownRole() === 'admin') return next('/')
+    // 路由没有整页刷新，上一个用户留下的「静默探测已试过」标记会挡住下一个人，
+    // 所以在页面之间切换时清掉；整页刷新时这个守卫不会跑，标记仍然有效（防死循环）
+    // 从别的页面（比如 /403 点「换个账号」）过来也不能被它挡住
+    if (to.path === '/login' && !loggedIn) clearSilentTried()
     return next()
   }
 

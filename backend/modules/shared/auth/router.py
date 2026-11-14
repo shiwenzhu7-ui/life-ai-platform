@@ -38,6 +38,10 @@ from modules.shared.users.model import User
 
 router = APIRouter(prefix="/auth", tags=["认证"])
 
+# 静默探测（prompt=none）时 Keycloak 表示「这人没登着」的 error 取值。
+# 只在票据里记着 silent=True 时才翻译成 sso_silent —— 交互式登录本来就不该收到这两个。
+_SILENT_ERRORS = {"login_required", "interaction_required"}
+
 
 @router.post(
     "/register",
@@ -112,7 +116,7 @@ def _clear_state_cookie(response: Response) -> None:
     response_class=RedirectResponse,
     status_code=status.HTTP_302_FOUND,
 )
-def sso_login(next_path: str = "", app: str = "") -> RedirectResponse:
+def sso_login(next_path: str = "", app: str = "", silent: bool = False) -> RedirectResponse:
     """发起授权码流程。
 
     1. 生成 state / nonce / code_verifier（PKCE）
@@ -125,6 +129,11 @@ def sso_login(next_path: str = "", app: str = "") -> RedirectResponse:
     `app` 是哪个前端在发起：life-web / admin-web。不传就当 life-web（老前端不传）。
     它决定三件事：用哪个 client_id + secret、成功后 302 回哪个前端、
     以及 state 票据里记下的「是哪个应用」。见 sso_state.issue 的说明。
+
+    `silent=True` 走 prompt=none：**绝不弹登录框**，只问 Keycloak「这人还登着吗」。
+    前端用它实现「A 应用登录过，打开 B 应用直接进去」。没登着时 Keycloak 回
+    error=login_required，回调会把 sso_error 换成 sso_silent，前端据此安静地
+    显示登录表单 —— 不能弹红字，否则每打开一次登录页都报一次错。
     """
     target = app or settings.oidc_default_app
     if not oidc.sso_configured(target):
@@ -139,10 +148,21 @@ def sso_login(next_path: str = "", app: str = "") -> RedirectResponse:
     verifier = oidc.new_code_verifier()
 
     cookie_value = sso_state.issue(
-        app=target, state=state, code_verifier=verifier, nonce=nonce, next_path=next_path
+        app=target,
+        state=state,
+        code_verifier=verifier,
+        nonce=nonce,
+        next_path=next_path,
+        silent=silent,
     )
     response = RedirectResponse(
-        url=oidc.build_authorize_url(app=target, state=state, nonce=nonce, code_verifier=verifier),
+        url=oidc.build_authorize_url(
+            app=target,
+            state=state,
+            nonce=nonce,
+            code_verifier=verifier,
+            prompt="none" if silent else "",
+        ),
         status_code=status.HTTP_302_FOUND,
     )
     _set_state_cookie(response, cookie_value)
@@ -189,10 +209,8 @@ def sso_callback(
         _clear_state_cookie(response)  # 失败也清，别让旧票据留着
         return response
 
-    # Keycloak 自己拒绝时会回 error=access_denied（用户点了「取消」）等
-    if error:
-        return back_with_error("access_denied" if error == "access_denied" else "sso_denied")
-
+    # 回调 URL 上只认这些：其它（含 login_required / interaction_required，
+    # 它们是静默探测的「没登录」信号，不能直接甩给前端当错误）一律算 sso_denied。
     try:
         saved = sso_state.read(request.cookies.get(settings.oidc_cookie_name))
     except AppError:
@@ -200,6 +218,14 @@ def sso_callback(
 
     app_name = str(saved.get("app") or "")
     redirect = front_end_of(app_name)
+    saved_silent = bool(saved.get("silent"))
+
+    if error:
+        if error == "access_denied":
+            return back_with_error("access_denied", app_name)
+        if error in _SILENT_ERRORS and saved_silent:
+            return back_with_error("sso_silent", app_name)
+        return back_with_error("sso_denied", app_name)
 
     # 时间恒定比较：不让外部通过响应耗时猜 state
     if not state or not secrets.compare_digest(saved["state"], state):

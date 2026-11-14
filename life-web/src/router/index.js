@@ -2,6 +2,7 @@ import Vue from 'vue'
 import VueRouter from 'vue-router'
 
 import { hasValidToken } from '@/utils/auth'
+import { clearSilentTried } from '@/utils/sso'
 
 Vue.use(VueRouter)
 
@@ -95,6 +96,9 @@ router.beforeEach((to, from, next) => {
   if (isPublic) {
     // 已登录还去登录页：直接回家，别让人看到登录框
     if (to.path === '/login' && loggedIn) return next('/')
+    // 路由没有整页刷新，上一个用户留下的「静默探测已试过」标记会挡住下一个人，
+    // 所以在页面之间切换时清掉；整页刷新时这个守卫不会跑，标记仍然有效（防死循环）
+    if (to.path === '/login' && !loggedIn) clearSilentTried()
     return next()
   }
 

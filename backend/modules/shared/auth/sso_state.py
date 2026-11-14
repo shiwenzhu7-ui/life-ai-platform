@@ -46,12 +46,24 @@ def _secret() -> str:
     return settings.jwt_secret
 
 
-def issue(*, app: str, state: str, code_verifier: str, nonce: str, next_path: str = "") -> str:
+def issue(
+    *,
+    app: str,
+    state: str,
+    code_verifier: str,
+    nonce: str,
+    next_path: str = "",
+    silent: bool = False,
+) -> str:
     """把票据签成一个短期 JWT，交给 router 写进 Cookie。
 
     app 也签进去：回调时要在「换 token 用哪套 secret、成功后送回哪个前端」
     之间做选择，**选择依据必须是我们自己签过的**，不能信回调请求里的参数
     （否则任何人都能指定用哪个客户端的名下换 token）。
+
+    silent=True 表示这是一次静默探测（prompt=none）：回调时如果 Keycloak
+    说「没登着」，前端应该安静地显示本地登录表单，而不是弹一句红字错误。
+    这个意图同样只从票据里读，不由回调 URL 决定 —— 理由同上。
     """
     now = int(time.time())
     payload = {
@@ -61,6 +73,7 @@ def issue(*, app: str, state: str, code_verifier: str, nonce: str, next_path: st
         "cv": code_verifier,
         "nonce": nonce,
         "next": next_path,  # 登录后要不要回到某个具体页面
+        "silent": bool(silent),
         "iat": now,
         "exp": now + settings.oidc_cookie_max_age,
     }

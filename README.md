@@ -394,7 +394,7 @@ life-ai-platform/
 - [x] 配置生活管理端、数据分析端和管理后台三个 OIDC Client（已完成 `life-web`、`admin-web`，`analytics-web` 待建）。
 - [ ] FastAPI 使用 JWKS 验证 Keycloak Access Token（**改为 BFF 模式**，见下；id_token 已用 JWKS 验 RS256）。
 - [x] 实现 `user`、`vip`、`admin` 角色权限（V1.4 已完成两级管理员）。
-- [ ] 实现多应用单点登录和统一退出（两个前端已可单点登录，统一退出待做）。
+- [x] 实现多应用单点登录（两个前端已无感互通，统一退出待做）。
 - [ ] 使用 Docker Compose 管理 MySQL、Milvus、Keycloak 和后端服务。
 - [ ] 完成安全测试、部署文档和演示数据。
 
@@ -416,6 +416,13 @@ Keycloak 只负责回答「你是谁」，角色仍然由本地 `users.role` 决
 `OIDC_REDIRECT_URI`（都留空即关闭 SSO）。回调统一走 `http://localhost:8080/api/v1/auth/sso/callback`，
 因为 `OIDC_REDIRECT_URI` 必须与 Keycloak 客户端里登记的那条逐字一致，而 Keycloak 只认
 浏览器能到达的地址。
+
+**无感登录（静默探测）**：真正的单点登录要解决「在 A 应用登录过，打开 B 应用不该再点一次按钮」。
+两个前端的登录页**一打开就先静默问一次账号中心**：`/auth/sso/login?...&silent=true`，
+后端在授权 URL 上带 `prompt=none`，Keycloak 已登着就直接回 `code`（用户看不到登录框），
+没登着就回 `error=login_required`，后端翻译成 `sso_silent`，前端安静地显示本地表单、不弹红字。
+前端用 `sessionStorage` 记「本标签页已探过」，避免「没登着 → 弹回登录页 → 又探」的死循环。
+退出登录时会清掉这个标记，所以换账号不会被挡住。
 
 完成标准：登录一个子应用后可无感访问其他已授权子应用；统一退出后所有子应用会话失效；项目可以按照部署文档完整启动。
 
