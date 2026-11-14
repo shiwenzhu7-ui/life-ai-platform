@@ -48,6 +48,12 @@ _HTTP_TIMEOUT = 10.0
 # Keycloak 换签名密钥是极低频操作，真换了最多 1 小时内本进程还不能验新 token。
 _JWKS_CACHE_SECONDS = 3600
 
+# 校验时间类 claim 的容差。Keycloak 与 Windows 主机之间只要差 1 秒，
+# 刚签发的 id_token 的 iat 就会「来自未来」，PyJWT 2.10+ 默认零容差会直接拒掉，
+# 表现为登录明明输对了密码却报 SSO_BAD_ID_TOKEN（日志 `The token is not yet valid (iat)`）。
+# 60 秒是官方文档建议的上限：既吃得下时钟漂移，又不给重放留明显窗口。
+_JWT_LEEWAY_SECONDS = 60
+
 _jwk_client: PyJWKClient | None = None
 
 
@@ -197,6 +203,7 @@ def decode_id_token(id_token: str, *, nonce: str) -> dict[str, Any]:
             algorithms=["RS256"],  # 写死算法，防止 alg 混淆攻击
             audience=settings.oidc_client_id,
             issuer=settings.oidc_issuer.rstrip("/"),
+            leeway=_JWT_LEEWAY_SECONDS,
             options={"require": ["exp", "iat", "sub", "iss", "aud"]},
         )
     except jwt.InvalidTokenError as exc:

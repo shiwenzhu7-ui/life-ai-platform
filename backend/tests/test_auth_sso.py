@@ -293,6 +293,30 @@ def test_callback_rejects_disabled_user(client, sso_env, fake_keycloak, monkeypa
     assert "token" not in info["q"], "禁用账号不能拿到任何令牌"
 
 
+def test_callback_tolerates_small_clock_skew(client, sso_env, fake_keycloak, monkeypatch):
+    """iat/nbf 比本机晚几秒（虚拟机时钟漂移）时要能登进去。
+
+    真实翻车现场：Keycloak 在 Rocky 虚拟机里，和 Windows 时钟差 1 秒以上，
+    刚签发的 id_token 的 iat「来自未来」，PyJWT 2.10+ 零容差直接抛
+    `The token is not yet valid (iat)`，用户看到的却是「身份凭证校验失败」。
+    这条用例锁住 oidc._JWT_LEEWAY_SECONDS，谁把它删了这里就红。
+    """
+    put_state_cookie(client)
+    now = int(time.time())
+    token = make_id_token(ks_key=fake_keycloak, nonce="n1", iat=now + 5, exp=now + 305)
+    monkeypatch.setattr(oidc, "exchange_code", lambda **_kw: {"id_token": token})
+
+    res = client.get(
+        SSO_CALLBACK,
+        params={"code": "c1", "state": "s1"},
+        cookies={settings.oidc_cookie_name: sso_state.issue(state="s1", code_verifier="v1", nonce="n1")},
+        follow_redirects=False,
+    )
+
+    assert res.status_code == 302, res.text
+    assert "token" in parse_redirect(res)["q"]
+
+
 def test_callback_drops_external_next(client, sso_env, fake_keycloak, monkeypatch):
     token = make_id_token(fake_keycloak, nonce="n1")
     monkeypatch.setattr(oidc, "exchange_code", lambda **_: {"id_token": token})
