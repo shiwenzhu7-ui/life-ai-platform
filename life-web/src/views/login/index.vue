@@ -45,6 +45,14 @@
             >登 录</el-button>
           </el-form>
 
+          <el-divider class="login__divider">或者</el-divider>
+
+          <el-button
+            class="login__sso"
+            icon="el-icon-key"
+            @click="onSsoLogin"
+          >用账号中心登录</el-button>
+
           <p class="login__hint">
             还没有账号？<el-link type="primary" @click="tab = 'register'">去注册</el-link>
           </p>
@@ -130,6 +138,8 @@
 //      前端不复制后端的规则 —— 复制了就会漂移。
 
 // 与后端 schema.py 的 _USERNAME_RE 一致：出错时看到的规则和真正执行的规则要一样。
+import { redirectToSsoLogin, ssoErrorText } from '@/utils/sso'
+
 const USERNAME_RE = /^[A-Za-z0-9_]{3,50}$/
 // bcrypt 只认 72 字节，代码里按 UTF-8 字节算（24 个汉字 = 72 字节）
 const PASSWORD_MAX_BYTES = 72
@@ -140,6 +150,7 @@ function byteLength(str) {
 
 export default {
   name: 'LoginView',
+  // 把「跳账号中心」这件事交给 utils/sso.js：这个页面只管按钮放在哪。
 
   data() {
     const checkPassword2 = (rule, value, callback) => {
@@ -153,6 +164,8 @@ export default {
     return {
       tab: 'login',
       submitting: false,
+      // SSO 失败回跳时带的 next（见 computed.redirectTarget）
+      redirectFallback: '',
 
       loginForm: {
         username: '',
@@ -216,19 +229,32 @@ export default {
   },
 
   computed: {
-    // 登录成功后回哪去：优先 query.redirect（路由守卫塞进来的原地址），
-    // 没有就回首页。必须是站内路径，防「?redirect=https://evil.com」这种跳转钓鱼。
+    // 登录成功后回哪去，三个来源按优先级：
+    //   1. query.redirect —— 路由守卫塞进来的「本来想去哪」
+    //   2. redirectFallback —— SSO 失败回跳时带回来的 next
+    //   3. '/'
+    // 每一条都必须是站内路径，防「?redirect=https://evil.com」这种跳转钓鱼。
     redirectTarget() {
       const target = this.$route.query.redirect
-      if (!target || typeof target !== 'string') return '/'
-      if (!target.startsWith('/') || target.startsWith('//')) return '/'
-      return target
+      if (target && typeof target === 'string') {
+        if (!target.startsWith('/') || target.startsWith('//')) return '/'
+        return target
+      }
+      return this.redirectFallback || '/'
     }
   },
 
   created() {
     // 带着 ?tab=register 进来时直接落在注册页
     if (this.$route.query.tab === 'register') this.tab = 'register'
+    // SSO 失败回跳时还会带上 next，登录成功后还要回那一页
+    const next = this.$route.query.next
+    if (next && typeof next === 'string' && next.startsWith('/') && !next.startsWith('//')) {
+      this.redirectFallback = next
+    }
+    // 后端 /auth/sso/callback 出错时 302 到 ?sso_error=xxx（见 utils/sso.js 的翻译表）
+    const ssoError = this.$route.query.sso_error
+    if (ssoError) this.$message.error(ssoErrorText(ssoError))
   },
 
   methods: {
@@ -301,6 +327,14 @@ export default {
       } finally {
         this.submitting = false
       }
+    },
+
+    // 走 Keycloak 单点登录。这里**不能**用 this.$router.push：
+    // 整页要离开本站在 Keycloak 上停一会儿，必须交给浏览器跳。
+    // 失败（比如 .env 没配 OIDC）回来会落在 /login?sso_error=…，
+    // 由 created() 里统一翻译成人话。
+    onSsoLogin() {
+      redirectToSsoLogin(this.redirectTarget)
     }
   }
 }
@@ -348,6 +382,20 @@ export default {
   &__submit {
     width: 100%;
     margin-top: 4px;
+  }
+
+  // 分隔线左右留白小一点，否则中间的「或者」显得离表单太远
+  &__divider {
+    margin: 18px 0 14px;
+
+    ::v-deep .el-divider__text {
+      font-size: 12px;
+      color: #c0c4cc;
+    }
+  }
+
+  &__sso {
+    width: 100%;
   }
 
   &__hint {

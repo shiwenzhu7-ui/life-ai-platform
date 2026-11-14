@@ -17,6 +17,14 @@ const routes = [
     meta: { title: '登录', public: true }
   },
   {
+    // Keycloak 登录完跳回来收令牌。必须 public —— 这一刻令牌还在 URL 上、
+    // 还没进 localStorage，守卫按 hasValidToken() 判断会把刚登录的人踢回 /login。
+    path: '/sso/callback',
+    name: 'sso-callback',
+    component: () => import('../views/sso/Callback.vue'),
+    meta: { title: '正在登录', public: true }
+  },
+  {
     path: '/',
     component: () => import('../layouts/BasicLayout.vue'),
     children: [

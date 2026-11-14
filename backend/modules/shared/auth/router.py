@@ -20,6 +20,7 @@ V2.0 的 BFF 分工（为什么 secret 只在后端、为什么前端不用改�
 """
 
 import secrets
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Request, Response, status
 from fastapi.responses import RedirectResponse
@@ -215,8 +216,12 @@ def sso_callback(
     if not next_path.startswith("/") or next_path.startswith("//"):
         next_path = ""
 
+    # 令牌当一次性票据用：带着 token 和 next 跳到前端，前端读完**立刻把地址栏洗掉**
+    # （见 life-web/src/views/sso/callback.vue）。这样令牌只在浏览器历史和
+    # referrer 里存在一瞬，不会留在用户随时能截图的地址栏上。
+    params = urlencode({"token": token, "next": next_path})
     response = RedirectResponse(
-        url=f"{redirect}?token={token}&next={next_path}",
+        url=f"{redirect}?{params}",
         status_code=status.HTTP_302_FOUND,
     )
     _clear_state_cookie(response)

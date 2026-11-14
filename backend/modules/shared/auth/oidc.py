@@ -214,7 +214,7 @@ def decode_id_token(id_token: str, *, nonce: str) -> dict[str, Any]:
 
 
 def claims_identity(claims: dict[str, Any]) -> dict[str, str | None]:
-    """从 claims 里取 sys_sync 关心的三样东西。
+    """从 claims 里取 sso_sync 关心的三样东西。
 
     sub  唯一且永不变 —— 本地绑定的依据，**只能用这个**。
     preferred_username  Keycloak 里的用户名：第一次 SSO 登录时用来认领本地同名的老账号。
