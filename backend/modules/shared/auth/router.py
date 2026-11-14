@@ -1,20 +1,37 @@
-"""认证接口（V1.2）—— docs/接口设计.md §3。
+"""认证接口（V1.2 / V2.0 SSO）—— docs/接口设计.md §3。
 
-    POST /auth/register  201  注册，返回 {id, username, role}
-    POST /auth/login     200  登录，返回 access_token / token_type / expires_in / user
-    POST /auth/logout    204  退出（本地 JWT 阶段无状态，前端清 token）
-    GET  /auth/me        200  当前用户信息
+    POST /auth/register      201  注册，返回 {id, username, role}
+    POST /auth/login         200  登录，返回 access_token / token_type / expires_in / user
+    POST /auth/logout        204  退出（本地 JWT 阶段无状态，前端清 token）
+    GET  /auth/me            200  当前用户信息（V2.0 另支持按 Keycloak 令牌当场换本地令牌）
+    GET  /auth/sso/login     302  跳到 Keycloak 授权页（V2.0）
+    GET  /auth/sso/callback  302  换到本地 JWT 后送回前端（V2.0）
 
-本文件只做两件事：把请求体交给 service、把返回值翻译成状态码。
+本文件只做三件事：把请求体交给 service、写/清 Cookie、把返回值翻译成状态码或跳转。
 业务判断一律在 service.py —— 这样 service 能脱离 HTTP 单测。
+
+V2.0 的 BFF 分工（为什么 secret 只在后端、为什么前端不用改请求头）：
+    浏览器 ──> /auth/sso/login ──302──> Keycloak
+    浏览器 在 Keycloak 上输密码（本站全程碰不到密码）
+    Keycloak ──302──> /auth/sso/callback?code=…&state=…
+    后端用 code + client_secret 换 id_token，验完签名 → 落到本地 users 一行
+    后端签发**自己的** JWT ──302──> 前端 /sso/callback?token=<本地JWT>
+    之后的请求照旧带 Authorization: Bearer <本地JWT>，require_role 那一套原封不动。
 """
 
-from fastapi import APIRouter, Depends, Response, status
+import secrets
+
+from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
+from core.config import settings
 from core.db import get_db
 from core.deps import get_current_user
-from modules.shared.auth import service
+from core.errors import AppError
+from core.security import create_access_token
+from core.time import now_utc
+from modules.shared.auth import oidc, service, sso_state
 from modules.shared.auth.schema import LoginIn, RegisterIn, TokenOut, UserBrief, UserOut
 from modules.shared.users.model import User
 
@@ -44,8 +61,11 @@ def login(data: LoginIn, db: Session = Depends(get_db)) -> TokenOut:
 def logout(user_id=Depends(get_current_user)) -> Response:
     """令牌是无状态的，后端没有会话可销毁。
 
-    保留这个接口而不是让前端「直接不发请求」：V2.0 换 Keycloak 时要在这里
-    调 SSO 统一退出，那时候前端不用改代码。
+    这里的 204 仍然保留，给「本地账号密码登录」和旧前端用。
+    SSO 会话里的「退出」要比本地多一步：还得清掉 Keycloak 那边的会话 Cookie，
+    否则单点登录的意义就没了 —— 下次点登录 Keycloak 认出你还登录着，直接放行。
+    那一跳由前端自己拼 URL 完成（同源 Cookie 只认 Keycloak 那个域名），
+    端点取 settings.oidc_issuer + /protocol/openid-connect/logout。
     """
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -53,3 +73,152 @@ def logout(user_id=Depends(get_current_user)) -> Response:
 @router.get("/me", response_model=UserOut, summary="当前用户信息")
 def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> UserOut:
     return service.me(db, user)
+
+
+# ---------- V2.0：SSO（BFF 模式）----------
+
+
+def _sso_cookie_path() -> str:
+    """Cookie 只发给 SSO 那两个接口，别把票据撒到全站。"""
+    return f"{settings.api_v1_prefix}/auth/sso"
+
+
+def _set_state_cookie(response: Response, value: str) -> None:
+    response.set_cookie(
+        key=settings.oidc_cookie_name,
+        value=value,
+        max_age=settings.oidc_cookie_max_age,
+        path=_sso_cookie_path(),
+        httponly=True,  # JS 读不到
+        samesite="lax",  # Keycloak 回跳是顶层 GET，Lax 允许带上
+        secure=settings.oidc_redirect_uri.startswith("https://"),  # http 下加了 Cookie 根本不下发
+    )
+
+
+def _clear_state_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=settings.oidc_cookie_name,
+        path=_sso_cookie_path(),
+        httponly=True,
+        samesite="lax",
+        secure=settings.oidc_redirect_uri.startswith("https://"),
+    )
+
+
+@router.get(
+    "/sso/login",
+    summary="跳转到 Keycloak 登录（302）",
+    response_class=RedirectResponse,
+    status_code=status.HTTP_302_FOUND,
+)
+def sso_login(next_path: str = "") -> RedirectResponse:
+    """发起授权码流程。
+
+    1. 生成 state / nonce / code_verifier（PKCE）
+    2. 把三样票据签成短期 JWT 写进 HttpOnly Cookie（浏览器帮你保管）
+    3. 302 到 Keycloak 授权页
+
+    `next` 是登录成功后前端要回的站内路径，夹在 Cookie 里而不是 URL 里，
+    回调时再拼，避免中间人手改。
+    """
+    if not oidc.sso_configured():
+        raise AppError(
+            "SSO_NOT_CONFIGURED",
+            "单点登录未配置，请先用账号密码登录",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    state = oidc.new_state()
+    nonce = oidc.new_nonce()
+    verifier = oidc.new_code_verifier()
+
+    cookie_value = sso_state.issue(
+        state=state, code_verifier=verifier, nonce=nonce, next_path=next_path
+    )
+    response = RedirectResponse(
+        url=oidc.build_authorize_url(state=state, nonce=nonce, code_verifier=verifier),
+        status_code=status.HTTP_302_FOUND,
+    )
+    _set_state_cookie(response, cookie_value)
+    return response
+
+
+@router.get(
+    "/sso/callback",
+    summary="Keycloak 回调：换 token 并签本地 JWT（302 回前端）",
+    response_class=RedirectResponse,
+    status_code=status.HTTP_302_FOUND,
+)
+def sso_callback(
+    request: Request,
+    db: Session = Depends(get_db),
+    code: str = "",
+    state: str = "",
+    error: str = "",
+    error_description: str = "",
+) -> RedirectResponse:
+    """回调。任何一个环节不对都 302 回前端并带上 ?sso_error=…
+
+    为什么不直接抛 401/400：
+        这是用户在浏览器里跟着跳转的最后一跳，JSON 错误体他看不懂也回不去。
+        带着错误原因回到前端登录页，用已有的 Message 组件弹一句人话，体验才对。
+
+    顺序（每一步都不能少）：
+        cookie 存在且验签通过 → state 比对 → code 非空 → 换 token
+        → 验 id_token（签名/iss/aud/exp/nonce）→ 落本地用户 → 禁用检查 → 签本地 JWT
+    """
+    redirect = f"{settings.oidc_frontend_callback}"
+
+    def back_with_error(code_: str) -> RedirectResponse:
+        response = RedirectResponse(
+            url=f"{redirect}?sso_error={code_}", status_code=status.HTTP_302_FOUND
+        )
+        _clear_state_cookie(response)  # 失败也清，别让旧票据留着
+        return response
+
+    # Keycloak 自己拒绝时会回 error=access_denied（用户点了「取消」）等
+    if error:
+        return back_with_error("access_denied" if error == "access_denied" else "sso_denied")
+
+    try:
+        saved = sso_state.read(request.cookies.get(settings.oidc_cookie_name))
+    except AppError:
+        return back_with_error("state_expired")
+
+    # 时间恒定比较：不让外部通过响应耗时猜 state
+    if not state or not secrets.compare_digest(saved["state"], state):
+        return back_with_error("state_mismatch")
+    if not code:
+        return back_with_error("missing_code")
+
+    try:
+        tokens = oidc.exchange_code(code=code, code_verifier=saved["cv"])
+        claims = oidc.decode_id_token(tokens["id_token"], nonce=saved["nonce"])
+        ident = oidc.claims_identity(claims)
+        user = service.sso_sync(
+            db, sub=ident["sub"], username=ident["username"], email=ident["email"]
+        )
+    except AppError as exc:
+        # token_rejected / bad_id_token / bad_nonce / unconfigured
+        return back_with_error(exc.code.lower())
+
+    if user.status != "active":
+        return back_with_error("user_disabled")
+
+    user.last_login_at = now_utc()
+    db.commit()
+    db.refresh(user)
+
+    token = create_access_token(user.id)
+    next_path = saved.get("next") or ""
+    # 只接受站内路径：挡住 //evil.com 与 http://…，避免开放重定向
+    if not next_path.startswith("/") or next_path.startswith("//"):
+        next_path = ""
+
+    response = RedirectResponse(
+        url=f"{redirect}?token={token}&next={next_path}",
+        status_code=status.HTTP_302_FOUND,
+    )
+    _clear_state_cookie(response)
+    return response
+

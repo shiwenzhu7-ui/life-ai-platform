@@ -93,6 +93,37 @@ class Settings(BaseSettings):
     # 单次检索返回的片段数（docs/项目规划.md S4：top_k=5）
     kb_top_k: int = 5
 
+    # ---------- SSO / OIDC（V2.0）----------
+    # Keycloak 只负责回答「你是谁」，回答完由本地签发自己的 JWT（BFF 模式）。
+    # 这样 auth_source 之外的一切 —— require_role、两级管理员、旧令牌 —— 都不用改。
+    #
+    # 全部都默认空串：没配时 /auth/sso/login 直接 503，而不是拼一个残缺的
+    # 授权 URL 让浏览器在 Keycloak 那边看到一句看不懂的报错。
+    # 注意 issuer 末尾**不要**带斜杠，代码里按 f"{issuer}/protocol/..." 拼端点。
+    oidc_issuer: str = ""
+    oidc_client_id: str = ""
+    # 只放 .env（已 gitignore）；绝不打日志、绝不进响应体（NFR 11.1）
+    oidc_client_secret: str = ""
+    # 后端回调地址 —— 必须与 Keycloak 客户端「有效的重定向URI」逐字一致，
+    # 所以从配置读、不从请求里拼（拼出来的是浏览器看到的地址，中间隔着代理就错了）
+    oidc_redirect_uri: str = "http://localhost:8010/api/v1/auth/sso/callback"
+    # 换到本地 JWT 之后，浏览器被送回哪个前端页面。
+    # 前端在 /sso/callback 里从 query 取 token 存起来、再跳首页。
+    oidc_frontend_callback: str = "http://localhost:8080/sso/callback"
+    # state/code_verifier/nonce 装在这个 Cookie 里（HttpOnly，JS 读不到）。
+    # 只活 10 分钟：整个「点登录 → Keycloak 上输完密码」的窗口远小于这个数。
+    oidc_cookie_name: str = "lifeai_sso_state"
+    oidc_cookie_max_age: int = 600
+
+    @property
+    def oidc_ready(self) -> bool:
+        """SSO 是否配置齐全 —— 缺任一项就不允许发起授权。"""
+        return bool(
+            self.oidc_issuer.strip()
+            and self.oidc_client_id.strip()
+            and self.oidc_client_secret.strip()
+        )
+
     # ---------- 管理后台分级（V1.4）----------
     # 根管理员（库里的第一级）：只能由「第零级」设置，设完之后就不许在后台被改动。
     # 两种写法二选一，都指向同一个「第一个管理员」：

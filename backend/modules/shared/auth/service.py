@@ -105,3 +105,75 @@ def me(db: Session, user: User) -> UserOut:
         role=user.role,
         is_root_admin=is_root(db, user),
     )
+
+
+def sso_sync(db: Session, *, sub: str, username: str | None, email: str | None) -> User:
+    """把「Keycloak 说你是谁」落到本地 users 表的一行（V2.0 SSO）。
+
+    三种情况，按这个顺序判断：
+        1. keycloak_sub 已经绑过   → 就是这个用户，更新邮箱/昵称不急，先不动
+        2. 有同名本地账号          → 认领：把 sub 绑上去，auth_source 改 keycloak
+        3. 都没有                  → 新建一个 role=user 的普通用户
+
+    为什么用 sub 而不是邮箱/用户名认人：
+        邮箱可以在 Keycloak 里改（甚至被管理员改给别人），用户名也可能被回收；
+        sub 是这个 realm 里永不变的 UUID。用它绑定，「同一个 Keycloak 账号」
+        和「同一行本地用户」才是一一对应的。
+
+    为什么第 2 步允许「同名认领」：
+        老用户 demo 在本地已经有数据（待办、账本、知识库）。他第一次走 SSO 时，
+        如果不认领，会凭空多出一个新账号，之前的数据全看不到。
+        代价是「有人在 Keycloak 里注册了和你同名的账号」就能接管 —— 所以：
+            · 只认**没有绑过 sub** 的本地账号（已绑定的一律不抢）
+            · 认领后立刻写 auth_source=keycloak，管理后台能看出来源变了
+
+    角色永远不由这里决定：新账号一律 role=user。Keycloak 里就算有人给自己
+    加了 admin 角色也不会传过来 —— 角色归本地 users.role（决策见 docs/项目规划.md）。
+    """
+    if not sub:
+        raise unauthorized("登录校验未通过，请重新登录")
+
+    user = db.scalar(select(User).where(User.keycloak_sub == sub))
+    if user is not None:
+        if user.deleted_at is not None:
+            # 账号被软删了就当作不存在，不能凭 Keycloak 的令牌复活它
+            raise unauthorized(_BAD_CREDENTIALS)
+        return user
+
+    username = (username or "").strip()
+    if not username:
+        raise unauthorized("身份服务器未提供用户名，无法在本站建立账号")
+
+    user = db.scalar(select(User).where(User.username == username))
+    if user is not None:
+        if user.keycloak_sub is not None:
+            # 这个本地账号已经绑了**另一个** Keycloak 账号，不允许再被认领
+            raise conflict("该用户名已绑定其他登录账号，请联系管理员")
+        if user.deleted_at is not None:
+            raise unauthorized(_BAD_CREDENTIALS)
+        user.keycloak_sub = sub
+        user.auth_source = "keycloak"
+        if email and not user.email:
+            user.email = email
+        db.commit()
+        db.refresh(user)
+        return user
+
+    # 用户名有长度上限（String(50)），Keycloak 那边可能更长，截断并去重
+    safe_name = username[:50]
+    if db.scalar(select(User.id).where(User.username == safe_name)) is not None:
+        raise conflict("该用户名已被占用，请联系管理员")
+
+    user = User(
+        username=safe_name,
+        email=email,
+        keycloak_sub=sub,
+        auth_source="keycloak",
+        password_hash=None,  # SSO 账号本地没有口令
+        role="user",  # 写死，绝不让身份服务器决定本站角色
+        status="active",
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
