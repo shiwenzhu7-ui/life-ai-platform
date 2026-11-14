@@ -37,6 +37,7 @@ from modules.shared.users.model import User
 SSO_LOGIN = "/api/v1/auth/sso/login"
 SSO_CALLBACK = "/api/v1/auth/sso/callback"
 FRONTEND_PATH = "/sso/callback"
+API = "/api/v1"
 
 
 # ---------- 夹具：一对假的 Keycloak 签名密钥 ----------
@@ -395,6 +396,8 @@ def test_callback_creates_new_user_and_returns_local_jwt(
     assert info["path"] == FRONTEND_PATH
     assert "token" in info["q"], info
     assert "sso_error" not in info["q"]
+    # id_token 也要交出去：前端存进 sessionStorage，退出时当 id_token_hint 带回
+    assert info["q"]["id_token"] == token
 
     user = db.query(User).filter(User.username == "sso_bob").one()
     assert user.auth_source == "keycloak"
@@ -484,6 +487,65 @@ def test_callback_drops_external_next(client, sso_env, fake_keycloak, monkeypatc
     q = parse_redirect(res)["q"]
     assert q.get("next", "") == "", "站外路径必须被丢弃"
     assert q["token"], "丢弃 next 不影响登录本身"
+
+
+# ---------- 3.5 统一退出（V2.0）----------
+
+SSO_LOGOUT = f"{API}/auth/sso/logout"
+SSO_LOGOUT_CONFIRM = f"{API}/auth/sso/logout/confirm"
+
+
+def test_logout_confirm_redirects_to_keycloak_end_session(client, sso_env):
+    # 不跟随即 302：浏览器能跟，TestClient 跟了就会去打 192.168.88.134
+    res = client.get(
+        f"{SSO_LOGOUT_CONFIRM}?app=life-web&id_token=abc.def.ghi",
+        follow_redirects=False,
+    )
+    assert res.status_code == 302
+    url = res.headers["location"]
+    assert url.startswith("http://kc.test/realms/lifeai/protocol/openid-connect/logout")
+    assert "id_token_hint=abc.def.ghi" in url
+    assert "client_id=life-web" in url
+    # Keycloak 退完要回到**前端**登录页，不是后端接口
+    assert "post_logout_redirect_uri=http%3A%2F%2Flocalhost%3A8080%2Flogin" in url
+
+
+def test_logout_confirm_uses_client_of_the_calling_app(client, sso_env):
+    res = client.get(
+        f"{SSO_LOGOUT_CONFIRM}?app=admin-web&id_token=abc.def.ghi",
+        follow_redirects=False,
+    )
+    url = res.headers["location"]
+    assert "client_id=admin-web" in url
+    assert "post_logout_redirect_uri=http%3A%2F%2Flocalhost%3A8082%2Flogin" in url
+
+
+def test_logout_without_id_token_falls_back_to_login(client, sso_env):
+    # 没有 id_token（比如账号密码登录、或者升级前的旧会话）：Keycloak 退不掉，
+    # 但人必须被送回登录页，不能卡在半路
+    res = client.get(f"{SSO_LOGOUT_CONFIRM}?app=admin-web", follow_redirects=False)
+    assert res.status_code == 302
+    assert res.headers["location"] == "http://localhost:8082/login"
+
+
+def test_logout_confirm_drops_external_redirect(client, sso_env):
+    res = client.get(
+        f"{SSO_LOGOUT_CONFIRM}?app=life-web&id_token=abc&redirect=//evil.com/x",
+        follow_redirects=False,
+    )
+    # 落地页被换掉，但 Keycloak 那一跳还在（退出必须成功）
+    url = res.headers["location"]
+    assert url.startswith("http://kc.test/")
+    assert "evil.com" not in url
+    assert "post_logout_redirect_uri=http%3A%2F%2Flocalhost%3A8080%2Flogin" in url
+
+
+def test_logout_confirm_when_oidc_not_configured_just_goes_back(client, monkeypatch, sso_env):
+    # 没配 issuer 时应退化成「只退本地」，而不是 500
+    monkeypatch.setattr(oidc, "build_logout_url", lambda **_: "")
+    res = client.get(f"{SSO_LOGOUT_CONFIRM}?app=life-web&id_token=abc", follow_redirects=False)
+    assert res.status_code == 302
+    assert res.headers["location"] == "http://localhost:8080/login"
 
 
 # ---------- 4. sso_sync 的业务判定（脱离 HTTP 直接测） ----------

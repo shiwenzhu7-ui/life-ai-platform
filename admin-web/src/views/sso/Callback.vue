@@ -29,7 +29,7 @@
 //   3. 本页必须是 public（路由守卫放行）：此刻令牌还没进 localStorage，
 //      守卫要是拿 hasValidToken() 判断，会把刚登录的人踢回 /login —— 死循环。
 import { setToken } from '@/utils/auth'
-import { safeNextPath, ssoErrorText } from '@/utils/sso'
+import { saveIdToken, safeNextPath, ssoErrorText } from '@/utils/sso'
 
 // 等 /auth/me 的最长时间。它挂了也不能让人卡在「正在进入……」上。
 const ME_TIMEOUT_MS = 3000
@@ -65,6 +65,10 @@ export default {
 
     this.nextPath = safeNextPath(query.next)
     setToken(token) // 不传 expiresIn：不写过期时间戳，由后端 401 兜底
+    // id_token 也留一份：退出时要拿它当 id_token_hint，后端才知道「退谁的
+    // Keycloak 会话」。放 sessionStorage 而不是 localStorage —— 关掉标签页就没了，
+    // 而且它只对「退出」有用，不值得长期留存。
+    saveIdToken(query.id_token)
     this.$store.commit('user/SET_TOKEN', token)
     this.phase = 'done'
 

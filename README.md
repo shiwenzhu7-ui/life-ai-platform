@@ -394,7 +394,8 @@ life-ai-platform/
 - [x] 配置生活管理端、数据分析端和管理后台三个 OIDC Client（已完成 `life-web`、`admin-web`，`analytics-web` 待建）。
 - [ ] FastAPI 使用 JWKS 验证 Keycloak Access Token（**改为 BFF 模式**，见下；id_token 已用 JWKS 验 RS256）。
 - [x] 实现 `user`、`vip`、`admin` 角色权限（V1.4 已完成两级管理员）。
-- [x] 实现多应用单点登录（两个前端已无感互通，统一退出待做）。
+- [x] 实现多应用单点登录（两个前端已无感互通）。
+- [x] 实现统一退出（一次退出，两个前端的 Keycloak 会话一起失效）。
 - [ ] 使用 Docker Compose 管理 MySQL、Milvus、Keycloak 和后端服务。
 - [ ] 完成安全测试、部署文档和演示数据。
 
@@ -423,6 +424,13 @@ Keycloak 只负责回答「你是谁」，角色仍然由本地 `users.role` 决
 没登着就回 `error=login_required`，后端翻译成 `sso_silent`，前端安静地显示本地表单、不弹红字。
 前端用 `sessionStorage` 记「本标签页已探过」，避免「没登着 → 弹回登录页 → 又探」的死循环。
 退出登录时会清掉这个标记，所以换账号不会被挡住。
+
+**统一退出**：只清本地 JWT 是不够的 —— 浏览器里 Keycloak 的 `KEYCLOAK_SESSION` 还在，
+下一次打开任何一个前端，静默探测都会成功，用户会觉得「退不出去」。所以两个前端的
+退出都改成：清本地 token → 整页跳到 `/api/v1/auth/sso/logout/confirm?app=…&id_token=…`
+→ 后端 302 到 Keycloak `end_session` 清会话 → Keycloak 302 回该应用的登录页。
+`id_token` 由回调时一并交给前端，存在 `sessionStorage`（只用于退出，不进 localStorage）。
+退出之后再打开任何前端，静默探测只会得到 `sso_silent`，安静显示登录表单。
 
 完成标准：登录一个子应用后可无感访问其他已授权子应用；统一退出后所有子应用会话失效；项目可以按照部署文档完整启动。
 

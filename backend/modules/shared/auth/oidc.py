@@ -254,6 +254,34 @@ def decode_id_token(id_token: str, *, app: str, nonce: str) -> dict[str, Any]:
     return claims
 
 
+def build_logout_url(*, app: str, id_token: str, post_logout_redirect: str) -> str:
+    """拼 Keycloak 的退出地址（RP-Initiated Logout）。
+
+    三个参数缺一不可，少一个 Keycloak 的行为就不对：
+        id_token_hint            告诉 Keycloak「退的是谁的会话」。没有它，Keycloak
+                                 只能退「浏览器当前带的那个会话」—— 在同时开了两个
+                                 应用时会退错人，而且它也无法确认请求来自合法客户端。
+        post_logout_redirect_uri 退出后把浏览器送到哪。**必须事先在客户端的
+                                 「有效的注销后重定向URI」里登记过**，否则 Keycloak
+                                 会报 Invalid redirect uri 并停在一个白页上。
+        client_id                仅用于 Keycloak 认出是哪个客户端在请求退出。
+
+    没有 id_token_hint 时**不要**退回只给 post_logout_redirect_uri：Keycloak 会
+    忽略那个参数直接停在「你已退出」页，用户看到的是 Keycloak 的英文页面。
+
+    没配 issuer 时返回空串，由调用方决定退化成「只退本地」。
+    """
+    if not settings.oidc_issuer.strip() or not id_token:
+        return ""
+    params = {"id_token_hint": id_token, "post_logout_redirect_uri": post_logout_redirect}
+    try:
+        client_id, _ = client_credentials(app)
+        params["client_id"] = client_id
+    except AppError:
+        pass  # app 没配也别拦：id_token_hint 已经足够 Keycloak 认出客户端
+    return f"{_endpoint('/logout')}?{urlencode(params)}"
+
+
 def claims_identity(claims: dict[str, Any]) -> dict[str, str | None]:
     """从 claims 里取 sso_sync 关心的三样东西。
 

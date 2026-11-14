@@ -101,7 +101,16 @@ export default {
       return pendingMe
     },
 
-    // 退出：后端挂没挂都得能退出去，所以本地一定先清
+    // 退出：本地一定先清，然后交给账号中心清掉它自己的会话。
+    //
+    // 只清本地是不够的 —— 上次「退出后一刷新又自动进去了」就是因为它：
+    // 本地令牌没了，但浏览器里还留着 Keycloak 的会话 Cookie，登录页的静默
+    // 探测立刻又换回一张新令牌。所以清完本地必须再走一趟 Keycloak 的
+    // logout，见 utils/sso.js 的 redirectToSsoLogout。
+    //
+    // 为什么这一跳由组件发起、不放在这里：这里是 async action，调用方还指望
+    // 它 resolve 之后再做跳转；而统一退出是**整页跳走**，一旦发生就不再回来。
+    // 拆开之后，两件事各自负责：这里负责「本地干净」，组件负责「送出浏览器」。
     async logout({ commit }) {
       try {
         await logout({ silent: true })

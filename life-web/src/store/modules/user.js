@@ -101,6 +101,10 @@ export default {
 
     // 退出。后端 /auth/logout 是空实现（本地 JWT 无状态），
     // 所以本地一定要先把令牌清掉：后端挂了也得能退出，不能把用户卡在里面。
+    //
+    // 但只清本地不够 —— 浏览器里还留着 Keycloak 的会话 Cookie，登录页的静默
+    // 探测会立刻把人再放进来。清完之后由调用方发起 redirectToSsoLogout，
+    // 走一趟 Keycloak 的 logout 把那份会话也清掉。
     async logout({ commit }) {
       try {
         await authApi.logout({ silent: true })

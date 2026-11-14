@@ -49,6 +49,7 @@
 
 <script>
 import { mapGetters } from 'vuex'
+import { redirectToSsoLogout } from '@/utils/sso'
 
 // 菜单项与 router 里的路径一一对应；改路径要两边一起改。
 const MENUS = [
@@ -94,8 +95,11 @@ export default {
       }
       // action 内部已经处理了「后端挂了也要清本地令牌」
       await this.$store.dispatch('user/logout')
-      // 用 replace 而不是 push：退出后不该能点「后退」回到刚才那个页面
-      this.$router.replace('/login')
+      // 这里不是 router.replace 而是整页跳：
+      //   本地令牌已经清了，但浏览器里的 Keycloak 会话还在。只换路由的话，
+      //   登录页的静默探测会立刻把人再放进来 —— 用户看到的就是「退不出去」。
+      //   redirectToSsoLogout 先 302 到 Keycloak 清会话，再 302 回 /login。
+      redirectToSsoLogout({ redirect: '/login' })
     }
   }
 }

@@ -257,14 +257,94 @@ def sso_callback(
     if not next_path.startswith("/") or next_path.startswith("//"):
         next_path = ""
 
+    # id_token 一并交给前端（它只存 sessionStorage）：退出时要拿它当
+    # id_token_hint，后端才知道该退哪一个 Keycloak 会话，见 /sso/logout/confirm。
+    # 它不是本站的通行证 —— 前端除了退出之外不会用它，API 请求一律带我们的本地 JWT。
+    #
     # 令牌当一次性票据用：带着 token 和 next 跳到前端，前端读完**立刻把地址栏洗掉**
     # （见 life-web/src/views/sso/callback.vue）。这样令牌只在浏览器历史和
     # referrer 里存在一瞬，不会留在用户随时能截图的地址栏上。
-    params = urlencode({"token": token, "next": next_path})
+    params = urlencode({"token": token, "id_token": tokens["id_token"], "next": next_path})
     response = RedirectResponse(
         url=f"{redirect}?{params}",
         status_code=status.HTTP_302_FOUND,
     )
     _clear_state_cookie(response)
     return response
+
+
+@router.get(
+    "/sso/logout",
+    summary="退出账号中心会话（302 到登录页）",
+    response_class=RedirectResponse,
+    status_code=status.HTTP_302_FOUND,
+)
+def sso_logout(
+    app: str = "",
+    redirect: str = "",
+) -> RedirectResponse:
+    """退出的「无 id_token」兜底：直接把浏览器送回登录页。
+
+    正常退出走 /sso/logout/confirm（前端带着 id_token 来）。这个接口留给
+    「前端拿不到 id_token」的场景 —— 比如用户清过 sessionStorage、或者用
+    账号密码登录进来、或者升级前登录的旧会话。此时本地一定退了，Keycloak
+    那边退不掉；至少要把人送回登录页，而不是让他卡在半路。
+
+    为什么单独一个接口而不是让 confirm 自己降级：confirm 是 GET，前端跳到它
+    就没法再执行 JS 把 id_token 补上了。分成两步之后，前端可以在「有
+    id_token」和「没有」之间自己选，后端只负责跳。
+    """
+    front = settings.oidc_frontend_login_of(app or settings.oidc_default_app)
+    return RedirectResponse(url=_safe_next(redirect, front), status_code=status.HTTP_302_FOUND)
+
+
+@router.get(
+    "/sso/logout/confirm",
+    summary="带 id_token 的第二跳：清掉 Keycloak 会话（302）",
+    response_class=RedirectResponse,
+    status_code=status.HTTP_302_FOUND,
+)
+def sso_logout_confirm(
+    app: str = "",
+    id_token: str = "",
+    redirect: str = "",
+) -> RedirectResponse:
+    """前端把 sessionStorage 里的 id_token 交上来，这里转成「清掉 Keycloak 会话」的一跳。
+
+    分工：
+        前端      清自己的 token，再整页跳到这个接口
+        这里      302 到 Keycloak 的 logout（带 id_token_hint）
+        Keycloak  验 id_token、清 KEYCLOAK_SESSION，再 302 回 post_logout_redirect_uri
+        前端      落回登录页；此时静默探测会收到 sso_silent，安静显示表单
+
+    为什么这么绕（前端存 id_token，再带回来）：后端无状态，不建会话表，
+    就不可能自己知道「这个人上一次登录时 Keycloak 发的 id_token 是什么」。
+    唯一可靠的持有者就是发起登录的那个浏览器。
+
+    为什么确认这一步是 GET 且**不做鉴权**：点退出时本地 JWT 往往已经过期
+    （前端先清 token），但 Keycloak 会话还活着 —— 那恰恰是最需要退出的场景。
+    退错人最多是「把别人的 Keycloak 会话退掉」，代价远小于「退不掉」。
+
+    任何一步不满足都退回登录页而不是报错：退出失败的最差结果应当是「本地退了、
+    Keycloak 没退」，用户可以再点一次；不该是「点了退出看到一页 500」。
+    """
+    front = settings.oidc_frontend_login_of(app or settings.oidc_default_app)
+    fallback = _safe_next(redirect, front)
+    if not id_token:
+        return RedirectResponse(url=fallback, status_code=status.HTTP_302_FOUND)
+
+    # 不让 id_token 进浏览器历史：Keycloak 验完会把浏览器 302 回 fallback，
+    # 我们这边的跳转 URL（含 id_token_hint）只出现在这一跳
+    url = oidc.build_logout_url(
+        app=app or settings.oidc_default_app, id_token=id_token, post_logout_redirect=fallback
+    )
+    # 没配 issuer、或者 Keycloak 那边推不出端点 → 退化成「只退本地」
+    return RedirectResponse(url=url or fallback, status_code=status.HTTP_302_FOUND)
+
+
+def _safe_next(value: str, fallback: str) -> str:
+    """只放行站内路径，其余一律回落到登录页。"""
+    if value and value.startswith("/") and not value.startswith("//"):
+        return value
+    return fallback
 

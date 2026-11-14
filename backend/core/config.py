@@ -140,6 +140,13 @@ class Settings(BaseSettings):
     # 只活 10 分钟：整个「点登录 → Keycloak 上输完密码」的窗口远小于这个数。
     oidc_cookie_name: str = "lifeai_sso_state"
     oidc_cookie_max_age: int = 600
+    # 退出票据的有效期（秒）。它只在前端点「退出」到浏览器被送到 Keycloak
+    # 这两三秒之间有效，5 分钟已经非常宽松。
+    oidc_logout_ticket_seconds: int = 300
+    # 各前端自己的登录页 —— 退出后浏览器回到哪一个。
+    # 格式同 oidc_frontend_callbacks（分号分隔的 app=url）。
+    # 不配就回落到 oidc_frontend_callbacks 里那个 app 的地址（去掉 /sso/callback）。
+    oidc_frontend_logins: str = ""
 
     @property
     def oidc_clients_map(self) -> dict[str, tuple[str, str]]:
@@ -196,8 +203,30 @@ class Settings(BaseSettings):
                     items[name.strip()] = url.strip()
         return items.get(app) or self.oidc_frontend_callback
 
+    def oidc_frontend_login_of(self, app: str) -> str:
+        """退出后回到哪个登录页。
+
+        优先用 OIDC_FRONTEND_LOGINS 里显式配的；没配就从
+        OIDC_FRONTEND_CALLBACKS 那个地址推：把结尾的 /sso/callback 换成 /login
+        （两个前端的目录结构都是 src/views/sso/Callback.vue 与 src/views/login/index.vue，
+        所以这条推导是稳的）。推不出来才回落到 callback 地址本身。
+        """
+        items: dict[str, str] = {}
+        for chunk in self.oidc_frontend_logins.replace("\n", ";").replace(",", ";").split(";"):
+            item = chunk.strip()
+            if item and "=" in item:
+                name, url = item.split("=", 1)
+                if name.strip() and url.strip():
+                    items[name.strip()] = url.strip()
+        if app in items:
+            return items[app]
+        base = self.oidc_frontend_callback_of(app)
+        marker = "/sso/callback"
+        if marker in base:
+            return base.replace(marker, "/login")
+        return base
+
     def oidc_ready_for(self, app: str) -> bool:
-        """SSO 对这个前端是否可用 —— 缺 issuer 或缺这个 app 的密钥就是不可用。"""
         target = app or self.oidc_default_app
         return bool(self.oidc_issuer.strip() and target and self.oidc_client_of(target))
 

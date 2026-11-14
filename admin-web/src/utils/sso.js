@@ -99,3 +99,62 @@ export function silentAlreadyTried() {
     return false
   }
 }
+
+// ---------- 退出（V2.0）----------
+
+// Keycloak 的 id_token，只在「这次登录」期间有用：退出时当 id_token_hint 交给
+// 后端，后端转给 Keycloak，Keycloak 才知道该清哪个会话。
+//
+// 为什么存 sessionStorage 而不是 localStorage：
+//   1. 关掉标签页就该失效 —— 它和「这一次登录」绑定；
+//   2. 它是 Keycloak 签的、能证明身份的令牌，长期留在盘上等于多一个泄露面。
+// 为什么存前端而不是后端：
+//   后端无状态（不建会话表），退出的凭据必须由调用方带回来。
+const ID_TOKEN_KEY = 'lifeai_sso_id_token'
+
+export function saveIdToken(idToken) {
+  if (!idToken || typeof idToken !== 'string') return
+  try {
+    window.sessionStorage.setItem(ID_TOKEN_KEY, idToken)
+  } catch (e) {
+    // 隐私模式下拿不到 storage：退出会退化成「只退本地」，不影响登录
+  }
+}
+
+export function takeIdToken() {
+  try {
+    const v = window.sessionStorage.getItem(ID_TOKEN_KEY) || ''
+    window.sessionStorage.removeItem(ID_TOKEN_KEY)
+    return v
+  } catch (e) {
+    return ''
+  }
+}
+
+export function clearIdToken() {
+  try {
+    window.sessionStorage.removeItem(ID_TOKEN_KEY)
+  } catch (e) {
+    // 同上
+  }
+}
+
+// 退出：整页跳到后端的 /auth/sso/logout/confirm，带上 id_token 和自己要回的地址。
+//
+// 为什么整页跳而不是 axios：
+//   后端要 302 到**另一个域**的 Keycloak，axios 跟不了跨域跳转；只有浏览器
+//   能带着用户走过去。跳完之后 Keycloak 会清掉自己的会话 Cookie，再 302
+//   回到 redirect 指定的登录页 —— 那一刻两个前端就都真的退出去了。
+//
+// 为什么是 /confirm 而不是 /logout：
+//   /logout 只负责「回到前端、让前端把 id_token 带上来」，免得我们把 id_token
+//   放在 URL 里暴露给一段先执行 JS 的页面。这里 id_token 已经在手上，直接
+//   交给 confirm 一步到位。
+export function redirectToSsoLogout({ redirect = '/login' } = {}) {
+  const base = process.env.VUE_APP_API_BASE || '/api/v1'
+  const params = [`app=${encodeURIComponent(APP_NAME)}`]
+  if (redirect) params.push(`redirect=${encodeURIComponent(redirect)}`)
+  const idToken = takeIdToken()
+  if (idToken) params.push(`id_token=${encodeURIComponent(idToken)}`)
+  window.location.href = `${base}/auth/sso/logout/confirm?${params.join('&')}`
+}

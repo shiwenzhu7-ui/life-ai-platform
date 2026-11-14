@@ -28,7 +28,7 @@
 //   3. 令牌存在 localStorage 里（utils/auth.js），和账号密码登录完全同一条路，
 //      所以后面的 request.js 请求拦截、路由守卫一个字都不用改。
 import { setToken } from '@/utils/auth'
-import { safeNextPath, ssoErrorText } from '@/utils/sso'
+import { saveIdToken, safeNextPath, ssoErrorText } from '@/utils/sso'
 
 // created 里排的自动跳转，销毁时要取消，否则页面都换了还往旧地址跳
 let leaveTimer = null
@@ -62,6 +62,9 @@ export default {
     this.nextPath = safeNextPath(query.next)
     setToken(token) // 不传 expiresIn：不写过期时间戳，由后端 401 兜底
     this.$store.commit('user/SET_TOKEN', token)
+    // id_token 只留给退出用（sessionStorage，不进 localStorage）：
+    // 后端无状态，退出时得由浏览器把「退哪一次登录」带回去。
+    saveIdToken(query.id_token)
     this.phase = 'done'
 
     // 不等 fetchMe：它失败也不该卡住人，布局挂载后会自己再拉一次
