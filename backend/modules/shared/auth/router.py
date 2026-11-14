@@ -112,17 +112,22 @@ def _clear_state_cookie(response: Response) -> None:
     response_class=RedirectResponse,
     status_code=status.HTTP_302_FOUND,
 )
-def sso_login(next_path: str = "") -> RedirectResponse:
+def sso_login(next_path: str = "", app: str = "") -> RedirectResponse:
     """发起授权码流程。
 
     1. 生成 state / nonce / code_verifier（PKCE）
-    2. 把三样票据签成短期 JWT 写进 HttpOnly Cookie（浏览器帮你保管）
+    2. 把票据（含发起方 app）签成短期 JWT 写进 HttpOnly Cookie
     3. 302 到 Keycloak 授权页
 
     `next` 是登录成功后前端要回的站内路径，夹在 Cookie 里而不是 URL 里，
     回调时再拼，避免中间人手改。
+
+    `app` 是哪个前端在发起：life-web / admin-web。不传就当 life-web（老前端不传）。
+    它决定三件事：用哪个 client_id + secret、成功后 302 回哪个前端、
+    以及 state 票据里记下的「是哪个应用」。见 sso_state.issue 的说明。
     """
-    if not oidc.sso_configured():
+    target = app or settings.oidc_default_app
+    if not oidc.sso_configured(target):
         raise AppError(
             "SSO_NOT_CONFIGURED",
             "单点登录未配置，请先用账号密码登录",
@@ -134,10 +139,10 @@ def sso_login(next_path: str = "") -> RedirectResponse:
     verifier = oidc.new_code_verifier()
 
     cookie_value = sso_state.issue(
-        state=state, code_verifier=verifier, nonce=nonce, next_path=next_path
+        app=target, state=state, code_verifier=verifier, nonce=nonce, next_path=next_path
     )
     response = RedirectResponse(
-        url=oidc.build_authorize_url(state=state, nonce=nonce, code_verifier=verifier),
+        url=oidc.build_authorize_url(app=target, state=state, nonce=nonce, code_verifier=verifier),
         status_code=status.HTTP_302_FOUND,
     )
     _set_state_cookie(response, cookie_value)
@@ -167,12 +172,19 @@ def sso_callback(
     顺序（每一步都不能少）：
         cookie 存在且验签通过 → state 比对 → code 非空 → 换 token
         → 验 id_token（签名/iss/aud/exp/nonce）→ 落本地用户 → 禁用检查 → 签本地 JWT
-    """
-    redirect = f"{settings.oidc_frontend_callback}"
 
-    def back_with_error(code_: str) -> RedirectResponse:
+    **是哪个前端发起的，只认 Cookie 票据里签过的那一份**（saved["app"]）。
+    回调 URL 上的 ?app= 不参与决策 —— 否则谁都能指定「用 admin-web 的 secret 换」。
+    错误回跳也用这个 app 选前端地址，免得管理端失败把用户丢到生活端登录页。
+    """
+    fallback = f"{settings.oidc_frontend_callback}"
+
+    def front_end_of(app_name: str) -> str:
+        return settings.oidc_frontend_callback_of(app_name) or fallback
+
+    def back_with_error(code_: str, app_name: str = "") -> RedirectResponse:
         response = RedirectResponse(
-            url=f"{redirect}?sso_error={code_}", status_code=status.HTTP_302_FOUND
+            url=f"{front_end_of(app_name)}?sso_error={code_}", status_code=status.HTTP_302_FOUND
         )
         _clear_state_cookie(response)  # 失败也清，别让旧票据留着
         return response
@@ -186,25 +198,28 @@ def sso_callback(
     except AppError:
         return back_with_error("state_expired")
 
+    app_name = str(saved.get("app") or "")
+    redirect = front_end_of(app_name)
+
     # 时间恒定比较：不让外部通过响应耗时猜 state
     if not state or not secrets.compare_digest(saved["state"], state):
-        return back_with_error("state_mismatch")
+        return back_with_error("state_mismatch", app_name)
     if not code:
-        return back_with_error("missing_code")
+        return back_with_error("missing_code", app_name)
 
     try:
-        tokens = oidc.exchange_code(code=code, code_verifier=saved["cv"])
-        claims = oidc.decode_id_token(tokens["id_token"], nonce=saved["nonce"])
+        tokens = oidc.exchange_code(app=app_name, code=code, code_verifier=saved["cv"])
+        claims = oidc.decode_id_token(tokens["id_token"], app=app_name, nonce=saved["nonce"])
         ident = oidc.claims_identity(claims)
         user = service.sso_sync(
             db, sub=ident["sub"], username=ident["username"], email=ident["email"]
         )
     except AppError as exc:
         # token_rejected / bad_id_token / bad_nonce / unconfigured
-        return back_with_error(exc.code.lower())
+        return back_with_error(exc.code.lower(), app_name)
 
     if user.status != "active":
-        return back_with_error("user_disabled")
+        return back_with_error("user_disabled", app_name)
 
     user.last_login_at = now_utc()
     db.commit()

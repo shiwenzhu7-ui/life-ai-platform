@@ -61,9 +61,25 @@ def _endpoint(path: str) -> str:
     return f"{settings.oidc_issuer.rstrip('/')}{_KC}{path}"
 
 
-def sso_configured() -> bool:
-    """配置齐不齐。router 用它决定是「发起授权」还是 503。"""
-    return settings.oidc_ready
+def sso_configured(app: str = "") -> bool:
+    """这个前端能不能用 SSO。router 用它决定是「发起授权」还是 503。"""
+    return settings.oidc_ready_for(app)
+
+
+def client_credentials(app: str) -> tuple[str, str]:
+    """取某个前端的 (client_id, client_secret)，没配就 503。
+
+    这是唯一一处「app 名 → 密钥」的转换点：router 只传 app 名，
+    永远不自己拼 secret，避免哪个分支忘了换而用错客户端的凭据。
+    """
+    found = settings.oidc_client_of(app)
+    if not found:
+        raise AppError(
+            "SSO_NOT_CONFIGURED",
+            "单点登录未配置，请先用账号密码登录",
+            503,
+        )
+    return found
 
 
 def new_state() -> str:
@@ -98,7 +114,7 @@ def code_challenge_of(verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
-def build_authorize_url(*, state: str, nonce: str, code_verifier: str) -> str:
+def build_authorize_url(*, app: str, state: str, nonce: str, code_verifier: str) -> str:
     """拼出浏览器要跳转的授权页地址。
 
     scope 只要 openid 三件套：
@@ -106,10 +122,14 @@ def build_authorize_url(*, state: str, nonce: str, code_verifier: str) -> str:
         profile  给 preferred_username / name
         email    给 email（本地建号时用，可空）
     多余的用户不要（roles 之类我们不用 Keycloak 的角色，角色归本地 users.role）。
+
+    client_id 与 redirect_uri 都按 app 取：life-web 和 admin-web 在 Keycloak 里
+    是两个客户端，各自的「有效的重定向URI」也不同，混用会被 Keycloak 拒。
     """
+    client_id, _ = client_credentials(app)
     params = {
         "response_type": "code",
-        "client_id": settings.oidc_client_id,
+        "client_id": client_id,
         "redirect_uri": settings.oidc_redirect_uri,
         "scope": "openid profile email",
         "state": state,
@@ -120,19 +140,24 @@ def build_authorize_url(*, state: str, nonce: str, code_verifier: str) -> str:
     return f"{_endpoint('/auth')}?{urlencode(params)}"
 
 
-def exchange_code(*, code: str, code_verifier: str) -> dict[str, Any]:
+def exchange_code(*, app: str, code: str, code_verifier: str) -> dict[str, Any]:
     """用 code 换令牌。**后端**发起，client_secret 只出现在这里的请求体里。
 
     失败一律转成 401 —— 这条链路上出错（code 过期、secret 错、Keycloak 挂了）
     对用户来说都是同一件事：「这次登录没成功，再点一次」。
     但日志里要分清是哪一种，所以把上游的 error 字段带进 detail。
+
+    **secret 按 app 取**：用 admin-web 的 code 配 life-web 的 secret 去换，
+    Keycloak 会回 invalid_client —— 所以 app 必须从 state 票据里来，
+    不能从请求参数里来（那等于让外人选择用哪套密钥）。
     """
+    client_id, client_secret = client_credentials(app)
     payload = {
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": settings.oidc_redirect_uri,
-        "client_id": settings.oidc_client_id,
-        "client_secret": settings.oidc_client_secret,
+        "client_id": client_id,
+        "client_secret": client_secret,
         "code_verifier": code_verifier,
     }
     try:
@@ -183,25 +208,26 @@ def _get_jwks_client() -> PyJWKClient:
     return _jwk_client
 
 
-def decode_id_token(id_token: str, *, nonce: str) -> dict[str, Any]:
+def decode_id_token(id_token: str, *, app: str, nonce: str) -> dict[str, Any]:
     """验证 id_token 的签名/签发者/受众/有效期/nonce，然后返回 claims。
 
     验哪些：
         signature  Keycloak 的 RS256 公钥（JWKS），验不过 = 令牌是伪造的
         iss        必须等于配置的 issuer（防止把别的 realm 的令牌骗过来）
-        aud        必须包含我们的 client_id（防止拿给别的客户端的令牌）
+        aud        必须包含**这个 app 的** client_id（防止拿给别的客户端的令牌）
         exp        过期时间
         nonce      必须等于我们自己发的那个（防重放）
 
     验不过一律 401，对外只说「登录校验未通过」。
     """
+    client_id, _ = client_credentials(app)
     try:
         signing_key = _get_jwks_client().get_signing_key_from_jwt(id_token)
         claims = jwt.decode(
             id_token,
             signing_key.key,
             algorithms=["RS256"],  # 写死算法，防止 alg 混淆攻击
-            audience=settings.oidc_client_id,
+            audience=client_id,
             issuer=settings.oidc_issuer.rstrip("/"),
             leeway=_JWT_LEEWAY_SECONDS,
             options={"require": ["exp", "iat", "sub", "iss", "aud"]},

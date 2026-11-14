@@ -46,11 +46,17 @@ def _secret() -> str:
     return settings.jwt_secret
 
 
-def issue(*, state: str, code_verifier: str, nonce: str, next_path: str = "") -> str:
-    """把三样票据签成一个短期 JWT，交给 router 写进 Cookie。"""
+def issue(*, app: str, state: str, code_verifier: str, nonce: str, next_path: str = "") -> str:
+    """把票据签成一个短期 JWT，交给 router 写进 Cookie。
+
+    app 也签进去：回调时要在「换 token 用哪套 secret、成功后送回哪个前端」
+    之间做选择，**选择依据必须是我们自己签过的**，不能信回调请求里的参数
+    （否则任何人都能指定用哪个客户端的名下换 token）。
+    """
     now = int(time.time())
     payload = {
         "typ": _TOKEN_TYPE,
+        "app": app,  # 发起方：life-web / admin-web / …
         "state": state,
         "cv": code_verifier,
         "nonce": nonce,
@@ -77,7 +83,7 @@ def read(raw: str | None) -> dict[str, Any]:
             # 用 leeway 而不是完全放开 exp 校验：容忍 5 秒的机器间时钟漂移，
             # 但过期的票据照样判废 —— 这张票只该活 10 分钟。
             leeway=timedelta(seconds=5),
-            options={"require": ["exp", "iat", "state", "cv", "nonce", "typ"]},
+            options={"require": ["exp", "iat", "app", "state", "cv", "nonce", "typ"]},
         )
     except jwt.InvalidTokenError:
         raise AppError("SSO_STATE_INVALID", "登录超时，请重新登录", 400) from None

@@ -16,6 +16,14 @@ const routes = [
     meta: { title: '登录', public: true }
   },
   {
+    path: '/sso/callback',
+    name: 'sso-callback',
+    component: () => import('../views/sso/Callback.vue'),
+    // ⚠️ 必须 public：回调落地的一瞬间令牌还没进 localStorage，
+    // 守卫要是拿 hasValidToken() 判断，会把刚登录的人踢回 /login —— 死循环。
+    meta: { title: '正在登录', public: true }
+  },
+  {
     path: '/403',
     name: 'forbidden',
     component: () => import('../views/Forbidden.vue'),
@@ -83,7 +91,9 @@ router.beforeEach((to, from, next) => {
   const loggedIn = hasValidToken()
 
   if (isPublic) {
-    // 已登录还能看 /403（要给「换个账号」按钮），只有 /login 才弹走
+    // 已登录还能看 /403（要给「换个账号」按钮），只有 /login 才弹走。
+    // 非管理员也能重登（换管理员账号或走账号中心），所以不再拦 —— 原先这里
+    // 只放 admin 走，二级/普通用户点「重新登录」会被无故弹回后台页。
     if (to.path === '/login' && loggedIn && knownRole() === 'admin') return next('/')
     return next()
   }

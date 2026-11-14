@@ -71,22 +71,36 @@ def fake_keycloak(monkeypatch, ks_key):
 def sso_env(monkeypatch):
     """保证 SSO 处于「已配置」状态，不被本机 .env 影响。"""
     monkeypatch.setattr(settings, "oidc_issuer", "http://kc.test/realms/lifeai")
-    monkeypatch.setattr(settings, "oidc_client_id", "life-web")
-    monkeypatch.setattr(settings, "oidc_client_secret", "secret-abcdefghijklmnopqrstuvwxyz123456")
+    monkeypatch.setattr(settings, "oidc_client_id", "")
+    monkeypatch.setattr(settings, "oidc_client_secret", "")
+    monkeypatch.setattr(
+        settings,
+        "oidc_clients",
+        "life-web=life-web:secret-abcdefghijklmnopqrstuvwxyz123456,"
+        "admin-web=admin-web:admin-secret-abcdefghijklmnopqrstuvwxyz",
+    )
     monkeypatch.setattr(
         settings, "oidc_redirect_uri", "http://localhost:8010/api/v1/auth/sso/callback"
     )
     monkeypatch.setattr(settings, "oidc_frontend_callback", "http://localhost:8080/sso/callback")
+    monkeypatch.setattr(
+        settings,
+        "oidc_frontend_callbacks",
+        "life-web=http://localhost:8080/sso/callback,admin-web=http://localhost:8082/sso/callback",
+    )
     return settings
 
 
-def make_id_token(ks_key, *, nonce, sub="kc-sub-1", username="sso_alice", **overrides) -> str:
-    """手搓一个「Keycloak 会发出来的」id_token。"""
+def make_id_token(
+    ks_key, *, nonce, sub="kc-sub-1", username="sso_alice", app="life-web", **overrides
+) -> str:
+    """手搓一个「Keycloak 会发出来的」id_token（aud 是这个 app 的 client_id）。"""
     now = int(time.time())
+    client_id = settings.oidc_client_of(app)[0]
     claims = {
         "iss": settings.oidc_issuer.rstrip("/"),
-        "aud": settings.oidc_client_id,
-        "azp": settings.oidc_client_id,
+        "aud": client_id,
+        "azp": client_id,
         "sub": sub,
         "preferred_username": username,
         "email": f"{username}@example.com",
@@ -98,7 +112,9 @@ def make_id_token(ks_key, *, nonce, sub="kc-sub-1", username="sso_alice", **over
     return jwt.encode(claims, ks_key, algorithm="RS256")
 
 
-def put_state_cookie(client, *, state="s1", verifier="v1", nonce="n1", next_path="") -> str:
+def put_state_cookie(
+    client, *, app="life-web", state="s1", verifier="v1", nonce="n1", next_path=""
+) -> str:
     """生成一次性票据并**以 Cookie 头的形式**带给回调。
 
     放弃 client.cookies.set 的原因：Starlette TestClient 会把 base_url 的
@@ -107,7 +123,7 @@ def put_state_cookie(client, *, state="s1", verifier="v1", nonce="n1", next_path
     排查起来极费时间。直接拼 header 最贴近浏览器的真实行为，也最不容易误判。
     """
     value = sso_state.issue(
-        state=state, code_verifier=verifier, nonce=nonce, next_path=next_path
+        app=app, state=state, code_verifier=verifier, nonce=nonce, next_path=next_path
     )
     return {settings.oidc_cookie_name: value}
 
@@ -144,10 +160,73 @@ def test_sso_login_redirects_and_sets_state_cookie(client, sso_env):
 
 
 def test_sso_login_503_when_not_configured(client, monkeypatch, sso_env):
-    monkeypatch.setattr(settings, "oidc_client_secret", "")
+    monkeypatch.setattr(settings, "oidc_clients", "")
     res = client.get(SSO_LOGIN, follow_redirects=False)
     assert res.status_code == 503
     assert res.json()["code"] == "SSO_NOT_CONFIGURED"
+
+
+def test_sso_login_503_when_app_not_configured(client, sso_env):
+    """admin-web 的密钥没配时，管理端不能发起登录，但生活端不受影响。"""
+    res = client.get(f"{SSO_LOGIN}?app=analytics-web", follow_redirects=False)
+    assert res.status_code == 503
+    assert res.json()["code"] == "SSO_NOT_CONFIGURED"
+    assert client.get(SSO_LOGIN, follow_redirects=False).status_code == 302
+
+
+def test_sso_login_uses_client_of_the_calling_app(client, sso_env):
+    """admin-web 发起的登录必须用 admin-web 的 client_id，并把 app 签进票据。"""
+    res = client.get(f"{SSO_LOGIN}?app=admin-web", follow_redirects=False)
+    assert res.status_code == 302
+
+    q = {k: v[0] for k, v in parse_qs(urlparse(res.headers["location"]).query).items()}
+    assert q["client_id"] == "admin-web", "用错了客户端，Keycloak 会按 redirect_uri 拒掉"
+
+    saved = sso_state.read(res.cookies.get(settings.oidc_cookie_name))
+    assert saved["app"] == "admin-web", "回调要靠这张票知道用哪套 secret、回哪个前端"
+
+
+def test_callback_of_admin_web_goes_back_to_admin_web(client, sso_env, fake_keycloak, monkeypatch):
+    """管理端登录走完后要回 8082，而不是生活端的 8080。"""
+    token = make_id_token(fake_keycloak, nonce="n1", app="admin-web", username="sso_admin")
+    monkeypatch.setattr(oidc, "exchange_code", lambda **_: {"id_token": token})
+
+    jar = put_state_cookie(client, app="admin-web")
+    res = client.get(f"{SSO_CALLBACK}?code=abc&state=s1", cookies=jar, follow_redirects=False)
+
+    info = parse_redirect(res)
+    assert info["path"] == "/sso/callback"
+    assert res.headers["location"].startswith("http://localhost:8082/"), res.headers["location"]
+    assert "token" in info["q"]
+
+
+def test_callback_uses_exchange_of_the_app_in_cookie(client, sso_env, fake_keycloak, monkeypatch):
+    """换 token 时用的 app 必须来自票据，不能来自回调 URL 上的参数。"""
+    seen: list[str] = []
+    token = make_id_token(fake_keycloak, nonce="n1", app="admin-web", username="sso_admin")
+    monkeypatch.setattr(
+        oidc, "exchange_code", lambda **kw: seen.append(kw["app"]) or {"id_token": token}
+    )
+
+    jar = put_state_cookie(client, app="admin-web")
+    # 攻击者试图在回调 URL 上指定用 life-web 的凭据
+    res = client.get(
+        f"{SSO_CALLBACK}?code=abc&state=s1&app=life-web", cookies=jar, follow_redirects=False
+    )
+
+    assert seen == ["admin-web"], "app 只认票据里的那一份，URL 参数不参与"
+    assert "token" in parse_redirect(res)["q"]
+
+
+def test_callback_rejects_id_token_of_another_client(client, sso_env, fake_keycloak, monkeypatch):
+    """aud 是 life-web 的 id_token 不能拿来登 admin-web。"""
+    token = make_id_token(fake_keycloak, nonce="n1", app="life-web", username="sso_admin")
+    monkeypatch.setattr(oidc, "exchange_code", lambda **_: {"id_token": token})
+
+    jar = put_state_cookie(client, app="admin-web")
+    res = client.get(f"{SSO_CALLBACK}?code=abc&state=s1", cookies=jar, follow_redirects=False)
+    assert res.headers["location"].startswith("http://localhost:8082/")
+    assert parse_redirect(res)["q"]["sso_error"] == "sso_bad_id_token"
 
 
 # ---------- 2. 失败路径：都回前端 ?sso_error=xxx ----------
@@ -163,7 +242,7 @@ def test_callback_without_cookie_goes_back_with_state_expired(client, sso_env, d
 
 
 def test_callback_with_tampered_cookie_is_rejected(client, sso_env, db):
-    good = sso_state.issue(state="s1", code_verifier="v1", nonce="n1")
+    good = sso_state.issue(app="life-web", state="s1", code_verifier="v1", nonce="n1")
     tampered = good[:-1] + ("A" if good[-1] != "A" else "B")  # 改一个字符 → 签名失效
     jar = {settings.oidc_cookie_name: tampered}
 
@@ -309,7 +388,11 @@ def test_callback_tolerates_small_clock_skew(client, sso_env, fake_keycloak, mon
     res = client.get(
         SSO_CALLBACK,
         params={"code": "c1", "state": "s1"},
-        cookies={settings.oidc_cookie_name: sso_state.issue(state="s1", code_verifier="v1", nonce="n1")},
+        cookies={
+            settings.oidc_cookie_name: sso_state.issue(
+                app="life-web", state="s1", code_verifier="v1", nonce="n1"
+            )
+        },
         follow_redirects=False,
     )
 

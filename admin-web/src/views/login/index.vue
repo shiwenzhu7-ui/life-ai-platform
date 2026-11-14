@@ -42,6 +42,14 @@
         >登 录</el-button>
       </el-form>
 
+      <el-divider class="login__divider">或者</el-divider>
+
+      <el-button
+        class="login__sso"
+        icon="el-icon-key"
+        @click="onSsoLogin"
+      >用账号中心登录</el-button>
+
       <p class="login__hint">
         这里没有注册入口。普通用户请去
         <a href="http://localhost:8080/login" class="login__link">LifeAI 主站</a>。
@@ -61,6 +69,12 @@
 // 这里登录成功后**不检查角色**，只把令牌存下来就进 /users：
 // 如果账号不是管理员，进去会看到 403 提示 + 顶部一个红色角色标签，
 // 这比在登录页拦下更容易解释「你的账号权限不足」，也省一次前端猜测。
+//
+// 账号中心登录（第二按钮）走的是另一条路：整页跳 /api/v1/auth/sso/login?app=admin-web，
+// Keycloak 那边验完人，后端签一个**和账号密码登录一模一样的本地 JWT**，
+// 浏览器被送回 /sso/callback，由 views/sso/Callback.vue 落令牌。
+// 所以本文件不碰令牌、不碰 axios —— 只负责把浏览器交出去。
+import { redirectToSsoLogin, ssoErrorText } from '@/utils/sso'
 
 export default {
   name: 'AdminLoginView',
@@ -68,6 +82,8 @@ export default {
   data() {
     return {
       submitting: false,
+      // 账号中心跳回来失败时带回的 next，优先于 query.redirect
+      redirectFallback: '',
       form: {
         username: '',
         password: ''
@@ -80,16 +96,27 @@ export default {
   },
 
   computed: {
-    // 优先 query.redirect，没有就进用户管理。必须是站内路径，防跳转钓鱼
+    // 优先 query.redirect（守卫塞的），其次 next（账号中心失败跳回来带的），
+    // 都没有就进用户管理。两个都必须是站内路径，防跳转钓鱼
     redirectTarget() {
-      const target = this.$route.query.redirect
-      if (!target || typeof target !== 'string') return '/users'
-      if (!target.startsWith('/') || target.startsWith('//')) return '/users'
-      return target
+      return this.pickTarget(this.$route.query.redirect) || this.pickTarget(this.redirectFallback) || '/users'
     }
   },
 
+  created() {
+    // 账号中心失败时会 302 到 /login?sso_error=xxx&next=...，这里翻译成中文弹出来
+    const { sso_error: ssoError, next } = this.$route.query
+    if (typeof next === 'string' && this.pickTarget(next)) this.redirectFallback = next
+    if (ssoError) this.$message.error(ssoErrorText(ssoError))
+  },
+
   methods: {
+    pickTarget(target) {
+      if (!target || typeof target !== 'string') return ''
+      if (!target.startsWith('/') || target.startsWith('//')) return ''
+      return target
+    },
+
     validate() {
       const form = this.$refs.loginForm
       if (!form) return Promise.resolve(false)
@@ -117,6 +144,11 @@ export default {
       } finally {
         this.submitting = false
       }
+    },
+
+    // 整页跳走，不走 axios：Keycloak 要接管整个浏览器
+    onSsoLogin() {
+      redirectToSsoLogin(this.redirectTarget)
     }
   }
 }
@@ -161,6 +193,20 @@ export default {
   &__submit {
     width: 100%;
     margin-top: 4px;
+  }
+
+  &__divider {
+    margin: 18px 0;
+
+    ::v-deep .el-divider__text {
+      background: #fff;
+      color: #c0c4cc;
+      font-size: 12px;
+    }
+  }
+
+  &__sso {
+    width: 100%;
   }
 
   &__hint {
