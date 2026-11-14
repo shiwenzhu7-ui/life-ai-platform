@@ -20,7 +20,10 @@ module.exports = defineConfig({
   // 也不用在前端写死后端端口（后端实际跑在 8010，文档里写的是 8000）。
   devServer: {
     port: 8080,
-    // history 模式下直接访问 /ai、/tasks 也要能打开（否则只能从首页点进来）
+    // history 模式下直接访问 /ai、/tasks 也要能打开（否则只能从首页点进来）。
+    // 2026-11-14 实测：vue-cli 自己会合并一份 historyApiFallback（disableDotRule +
+    // rewrites），手写的 index: '/index.html' 反而把 rewrite 目标改成了文件系统路径，
+    // 结果直接访问 /login、/sso/callback 全 404。所以这里保持 true，别再加别的键。
     historyApiFallback: true,
     proxy: {
       '/api': {

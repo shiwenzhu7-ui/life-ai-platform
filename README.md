@@ -389,14 +389,25 @@ life-ai-platform/
 
 目标：在完成 Keycloak 学习后，将普通 JWT 登录升级为统一身份认证。
 
-- 部署并配置 Keycloak。
-- 学习并应用 OAuth 2.0、OIDC 和 Authorization Code + PKCE。
-- 配置生活管理端、数据分析端和管理后台三个 OIDC Client。
-- FastAPI 使用 JWKS 验证 Keycloak Access Token。
-- 实现 `user`、`vip`、`admin` 角色权限。
-- 实现多应用单点登录和统一退出。
-- 使用 Docker Compose 管理 MySQL、Milvus、Keycloak 和后端服务。
-- 完成安全测试、部署文档和演示数据。
+- [x] 部署并配置 Keycloak（Rocky9 虚拟机上跑 `quay.io/keycloak/keycloak:26.4.0`，端口 8180）。
+- [x] 学习并应用 OAuth 2.0、OIDC 和 Authorization Code + PKCE。
+- [ ] 配置生活管理端、数据分析端和管理后台三个 OIDC Client（已完成 `life-web`）。
+- [ ] FastAPI 使用 JWKS 验证 Keycloak Access Token（**改为 BFF 模式**，见下）。
+- [x] 实现 `user`、`vip`、`admin` 角色权限（V1.4 已完成两级管理员）。
+- [ ] 实现多应用单点登录和统一退出。
+- [ ] 使用 Docker Compose 管理 MySQL、Milvus、Keycloak 和后端服务。
+- [ ] 完成安全测试、部署文档和演示数据。
+
+**接入方式：BFF 模式**（2026-11-14 实现）。浏览器只跟本项目的后端打交道，
+`client_secret` 与换 token 全在后端完成；后端拿到 Keycloak 的 `id_token` 校验通过后
+**签发原有的本地 JWT**。这样 `require_role`、两级管理员、前端请求拦截器一行都不用改，
+Keycloak 只负责回答「你是谁」，角色仍然由本地 `users.role` 决定。
+
+链路：`/api/v1/auth/sso/login`（302 去 Keycloak）→ Keycloak 登录 → `/api/v1/auth/sso/callback`
+（换 token、验 id_token、落本地用户、签本地 JWT）→ 302 回前端 `/sso/callback?token=…`，
+前端读完令牌立刻把地址栏洗掉。账号密码登录继续可用，两条路并存。
+
+配置在 `backend/.env`（三项都留空即关闭 SSO）：`OIDC_ISSUER`、`OIDC_CLIENT_ID`、`OIDC_CLIENT_SECRET`。
 
 完成标准：登录一个子应用后可无感访问其他已授权子应用；统一退出后所有子应用会话失效；项目可以按照部署文档完整启动。
 
