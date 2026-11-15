@@ -1,10 +1,10 @@
 # LifeAI 智能生活管理平台
 
-基于 **Vue 2 + FastAPI + MySQL + LangChain + Milvus** 的前后端分离智能生活管理平台，并在最终版本升级接入 Keycloak SSO。
+基于 **Vue 2 + FastAPI + MySQL + Milvus** 的前后端分离智能生活管理平台，并在最终版本升级接入 Keycloak SSO。
 
 平台用于统一管理个人待办、消费、购物、饮食、运动、睡眠、心情和生活日记，并通过 AI 助手使用自然语言完成数据录入、查询、总结和计划生成。系统同时支持个人知识库 RAG 问答，以及多个子应用之间的 SSO 单点登录。
 
-> 当前阶段：需求分析与项目初始化。业务代码尚未开始开发。
+> 当前进度：V1.0–V1.3 已完成，V1.4 进行中，V2.0 Keycloak SSO 已接入生活端与管理后台。
 
 ## 1. 项目背景
 
@@ -22,7 +22,7 @@ LifeAI 希望将这些功能整合到一个平台中，让用户可以直接通�
 
 1. 集中管理个人生活数据。
 2. 使用 AI 降低数据录入和查询成本。
-3. 使用 LangChain Agent 调用真实业务工具。
+3. 使用自研 Agent 工具层（Pydantic Schema 定义工具，无需 LangChain）调用真实业务工具。
 4. 使用 RAG 构建用户个人生活知识库。
 5. 使用 Keycloak 实现多应用 SSO 单点登录。
 6. 通过角色权限和用户隔离保护个人数据。
@@ -205,11 +205,11 @@ AI 提取结果：
 | 后端 | Python、FastAPI、Pydantic |
 | ORM | SQLAlchemy |
 | 数据迁移 | Alembic |
-| AI | LangChain、大语言模型、Embedding 模型 |
+| AI | 大语言模型（OpenAI 兼容接口）、Embedding 模型（fastembed + ONNX） |
 | SSO | Keycloak、OIDC、OAuth 2.0、JWT、JWKS |
 | 关系数据库 | MySQL 8.x |
 | 向量数据库 | Milvus |
-| LangChain 向量集成 | `langchain-milvus` |
+| 向量检索 | `pymilvus` 官方客户端 |
 | 文件存储 | 本地目录，后期可升级 MinIO |
 | 部署 | Docker、Docker Compose、Nginx |
 
@@ -223,7 +223,7 @@ AI 提取结果：
                        FastAPI
            认证校验、业务服务、权限控制
               /             |             \
-           MySQL        LangChain          Milvus
+           MySQL      自研工具层          Milvus
                             |
                          大语言模型
 ```
@@ -299,7 +299,7 @@ life-ai-platform/
 
 完成标准：用户可以在页面中管理待办和消费数据，刷新页面后数据仍保存在 MySQL 中。
 
-### V1.1 LangChain 智能助手版
+### V1.1 智能助手版
 
 目标：将已经学习的 LangChain 应用到真实业务。
 
