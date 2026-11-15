@@ -124,6 +124,12 @@ def _confirm(client, action_id: int, body: dict | None = None):
 
 
 def test_chat_produces_expense_card(client, provider):
+    # 用「今天」而不是写死日期：卡片只在日期落在前后 7 天内时才补「（周X）」，
+    # 写死 2026-11-08 会让这条用例随日历推移慢慢失效（已踩过一次）。
+    today = datetime.now(CST).date()
+    occurred = datetime(today.year, today.month, today.day, 12, 30, tzinfo=CST)
+    weekday = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")[occurred.weekday()]
+
     provider.queue(
         _reply(
             calls=[
@@ -132,7 +138,7 @@ def test_chat_produces_expense_card(client, provider):
                     type="expense",
                     category_name="餐饮",
                     account="支付宝",
-                    occurred_at="2026-11-08T12:30:00+08:00",
+                    occurred_at=occurred.isoformat(),
                     note="和同事一起",
                 )
             ]
@@ -152,7 +158,7 @@ def test_chat_produces_expense_card(client, provider):
     assert preview["category_id"] == EXPENSE_FOOD_ID, "落在 expense 域的餐饮，不是 task 域"
     assert preview["category_name"] == "餐饮"
     assert preview["account"] == "支付宝"
-    assert preview["occurred_at_text"] == "2026-11-08 12:30（周日）"
+    assert preview["occurred_at_text"] == f"{occurred:%Y-%m-%d %H:%M}（{weekday}）"
     assert preview["note"] == "和同事一起"
 
 

@@ -1,484 +1,288 @@
 # LifeAI 智能生活管理平台
 
-基于 **Vue 2 + FastAPI + MySQL + Milvus** 的前后端分离智能生活管理平台，并在最终版本升级接入 Keycloak SSO。
+基于 **Vue 2 + FastAPI + MySQL + Milvus** 的前后端分离生活管理平台：用自然语言记账、建待办，用个人知识库做 RAG 问答，用 Keycloak 做多应用单点登录。
 
-平台用于统一管理个人待办、消费、购物、饮食、运动、睡眠、心情和生活日记，并通过 AI 助手使用自然语言完成数据录入、查询、总结和计划生成。系统同时支持个人知识库 RAG 问答，以及多个子应用之间的 SSO 单点登录。
+> **项目状态：已归档，V1.0–V1.4 完成，V2.0 SSO 部分完成，不再新增功能。**
+> 后端 **820 个测试全部通过**。下文所有「完成/未完成」都以代码实际状态为准，不是计划。
 
-> 当前进度：V1.0–V1.3 已完成，V1.4 进行中，V2.0 Keycloak SSO 已接入生活端与管理后台。
+## 界面
+
+| 首页 | 待办 |
+|---|---|
+| ![首页](docs/demo/dashboard.png) | ![待办](docs/demo/tasks.png) |
+
+| 消费 | 知识库 |
+|---|---|
+| ![消费](docs/demo/expenses.png) | ![知识库](docs/demo/knowledge.png) |
 
 ## 1. 项目背景
 
-日常生活数据往往分散在待办软件、记账软件、备忘录和聊天工具中，用户需要反复切换应用，录入过程也比较繁琐。
+日常生活数据分散在待办软件、记账软件、备忘录和聊天工具里，用户需要反复切换应用，录入过程繁琐。
 
-LifeAI 希望将这些功能整合到一个平台中，让用户可以直接通过自然语言完成操作，例如：
+LifeAI 把这些功能整合到一个平台，让用户直接用自然语言操作：
 
-- “明天下午三点提醒我去超市。”
-- “今天午饭花了 28 元，帮我记到账本里。”
-- “查询本月在餐饮上花了多少钱。”
-- “根据最近一周的记录总结一下我的生活状态。”
-- “从我上传的健身资料中找一个适合新手的训练方案。”
+- "明天下午三点提醒我去超市。"
+- "今天午饭花了 28 元，帮我记到账本里。"
+- "查询本月在餐饮上花了多少钱。"
+- "从我上传的健身资料中找一个适合新手的训练方案。"
 
-## 2. 建设目标
+## 2. 已完成功能
 
-1. 集中管理个人生活数据。
-2. 使用 AI 降低数据录入和查询成本。
-3. 使用自研 Agent 工具层（Pydantic Schema 定义工具，无需 LangChain）调用真实业务工具。
-4. 使用 RAG 构建用户个人生活知识库。
-5. 使用 Keycloak 实现多应用 SSO 单点登录。
-6. 通过角色权限和用户隔离保护个人数据。
-7. 提供图表统计、生活周报和月报。
-8. 使用 Docker Compose 实现统一部署。
-
-## 3. 系统组成
-
-项目计划包含三个 Vue 应用和一个 FastAPI 后端。
-
-### 3.1 生活管理端
-
-- 首页仪表盘
-- 待办事项
-- 消费与预算
-- 购物清单
-- 饮食、运动、睡眠和心情记录
-- 生活日记
-- AI 生活助手
-- 个人知识库
-
-### 3.2 数据分析端
-
-- 月度消费趋势
-- 消费类别占比
-- 预算执行情况
-- 待办完成率
-- 运动频率
-- 睡眠和心情变化
-- AI 生活周报、月报
-
-### 3.3 系统管理后台
-
-- 用户管理
-- 角色管理
-- AI 模型配置
-- 知识库管理
-- 系统调用统计
-
-## 4. 用户角色
-
-| 角色 | 说明 | 主要权限 |
+| 模块 | 状态 | 说明 |
 |---|---|---|
-| `user` | 普通用户 | 管理个人生活数据，使用基础 AI 与知识库功能 |
-| `vip` | 高级用户 | 使用高级模型、更大知识库空间（**AI 每日调用额度已于 2026-11-10 取消，所有人无限次**） |
-| `admin` | 管理员 | 管理用户与配置（审计日志 2026-11-10 取消，公共知识不做） |
+| 待办事项 | ✅ 完成 | 增删改查、分类/优先级/截止时间、多维筛选、排序 |
+| 消费记账 | ✅ 完成 | 收支记录、月度汇总、类别占比、筛选分页 |
+| 购物清单 | ✅ 完成 | 清单与明细，支持 AI 批量添加 |
+| AI 生活助手 | ✅ 完成 | 10 个工具、写入需确认、只读直接回答 |
+| 个人知识库 RAG | ✅ 完成 | PDF/DOCX/TXT 上传、切分、向量化、带来源问答 |
+| 用户系统 | ✅ 完成 | JWT 登录、用户数据隔离、三级角色 |
+| 管理后台 | ✅ 完成 | 用户管理、AI 调用明细、角色说明、403 页 |
+| Keycloak SSO | ✅ 完成 | 两个前端单点登录 + 统一退出（BFF 模式） |
+| 首页仪表盘 | ✅ 完成 | 待办概览、本月消费、逾期提醒 |
 
-所有个人数据必须按用户隔离。一个用户不能查询或修改其他用户的待办、消费记录和知识文档。
+## 3. 未完成 / 明确不做
 
-## 5. 核心功能
+保持诚实，这部分和上面的完成项同等重要：
 
-### 5.1 SSO 单点登录
+- ❌ **饮食 / 运动 / 睡眠 / 心情 / 日记**：数据表已设计，前后端**均未实现**
+- ❌ **ECharts 图表**：`echarts 5.5.1` 装在 `package.json`，**业务代码零使用**；消费页的类别占比是 CSS 条形，不是 ECharts
+- ❌ **生活周报 / 月报**：未实现
+- ❌ **数据分析端 `analytics-web`**：目录为空
+- ❌ **Docker Compose 部署**：`deploy/`、`keycloak/` 目录为空，没有 Dockerfile
+- ❌ **`generate_life_report`、`query_life_records` 工具**：未实现
+- ❌ **审计日志**：按需求于 2026-11-10 取消
 
-- 使用 Keycloak 作为统一身份认证中心。
-- 使用 OpenID Connect 和 OAuth 2.0。
-- Vue 使用 Authorization Code Flow + PKCE。
-- FastAPI 使用 JWKS 验证 JWT Access Token。
-- 登录任一子应用后，访问其他子应用无需再次输入密码。
-- 支持统一退出和角色权限控制。
+## 4. 技术栈
 
-计划创建三个 OIDC Client：
-
-```text
-life-web
-analytics-web
-admin-web
-```
-
-### 5.2 待办事项
-
-- 新增、查看、修改和删除待办。
-- 设置分类、优先级、截止时间和提醒时间。
-- 支持未开始、进行中、已完成和已取消状态。
-- 按日期、分类、优先级和状态筛选。
-- 使用自然语言创建待办。
-
-### 5.3 消费与预算
-
-- 记录收入和支出。
-- 设置金额、类别、账户、时间和备注。
-- 设置月度总预算和分类预算。
-- 展示消费趋势、类别占比和预算执行情况。
-- 使用自然语言记账。
-
-### 5.4 购物清单
-
-- 创建多个购物清单。
-- 添加物品、数量、单位、分类和备注。
-- 标记已购买或未购买。
-- 让 AI 根据用户描述生成购物清单。
-
-### 5.5 生活记录
-
-- 饮食、运动、饮水、睡眠和心情记录
-- 生活日记
-- AI 周期总结
-
-AI 结果只作为生活管理参考，不作为医疗诊断或专业治疗建议。
-
-### 5.6 AI 生活助手
-
-AI 助手计划支持：
-
-```text
-创建待办
-查询待办
-记录消费
-查询消费
-管理购物清单
-查询生活记录
-生成饮食或运动计划
-总结一周或一个月的生活情况
-检索个人知识库
-```
-
-写入型操作不能直接执行。系统应先展示 AI 提取的结构化内容，用户确认后再保存。
-
-示例输入：
-
-```text
-明天下午三点去超市买牛奶和鸡蛋。
-```
-
-AI 提取结果：
-
-```json
-{
-  "title": "去超市购物",
-  "category": "购物",
-  "deadline": "明天下午3点",
-  "items": ["牛奶", "鸡蛋"]
-}
-```
-
-### 5.7 个人知识库 RAG
-
-用户可以上传 PDF、DOCX、TXT、菜谱、健身资料、家电说明书和个人生活笔记。系统对文档进行解析、切分、向量化和检索。回答问题时应显示文档名称或引用片段，并确保用户只能检索自己的资料。
-
-实现要点（V1.3）：PDF / DOCX / TXT，单个文件 ≤20MB，按 `sha256` 去重；正文只存在 MySQL 的 `document_chunks`，Milvus 只存向量与 `user_id` / `document_id` 两个过滤字段；嵌入用本地 `bge-small-zh-v1.5`（fastembed / ONNX，不需要 torch）；检索强制带 `user_id` 过滤，top_k=5。
-
-问答入口在 `POST /ai/chat`：模型看到问题后调用第 9 个工具 `search_personal_documents`，
-服务端把检索到的原文回灌给模型，响应里附带 `references[]`（文档名 / 页码 / 片段 / 相似度）供前端渲染来源卡片。
-引用**不落库**，只存在于当次响应。
-
-> 真机坑：Milvus 上 `insert` 之后 0 秒 `get`/`query`/`search` 会一起返回空，
-> 显式 `consistency_level="Strong"` 也不行，1 秒后才有。`search_chunks` 因此在
-> 首次检索为空时等 0.8 秒再查一次（见 `docs/AI设计.md` §7.4.1）。
-
-## 6. AI 工具设计
-
-> 实际实现**没有引入 LangChain**：工具层是自写的函数 + Pydantic Schema，切分器也是自写的字符切分。
-> V1.1 落地 7 个工具，V1.3 加上 `search_personal_documents` 共 9 个；
-> `add_shopping_item`（随购物推迟到 V1.4）、`query_life_records`、`generate_life_report` 尚未实现。
-
-| 工具 | 用途 | 类型 |
-|---|---|---|
-| `query_tasks` | 查询当前用户待办 | 只读 |
-| `create_task` | 创建待办 | 写入，需确认 |
-| `update_task` | 修改待办 | 写入，需确认 |
-| `delete_task` | 删除待办（硬删） | 写入，需确认 |
-| `query_expenses` | 查询消费数据 | 只读 |
-| `create_expense` | 新增消费记录 | 写入，需确认 |
-| `update_expense` | 修改消费记录 | 写入，需确认 |
-| `delete_expense` | 删除消费记录（硬删） | 写入，需确认 |
-| `search_personal_documents` | 检索个人知识库 | 只读 |
-| `query_life_records` | 查询生活记录（V1.4） | 只读 |
-| `add_shopping_item` | 添加购物项目（V1.4 推迟） | 写入，需确认 |
-| `generate_life_report` | 生成生活报告（V1.4） | 生成 |
-
-用户 ID 必须由 FastAPI 根据验证后的 Token 注入工具，不能让大模型自行提供用户 ID。
-
-## 7. 技术栈
-
-| 模块 | 技术 |
+| 层 | 技术 |
 |---|---|
-| 页面基础 | HTML、CSS、JavaScript |
-| 前端 | Vue 2、Vue Router 3、Vuex |
-| HTTP 请求 | Axios / Ajax |
-| 图表 | ECharts |
-| 后端 | Python、FastAPI、Pydantic |
-| ORM | SQLAlchemy |
-| 数据迁移 | Alembic |
-| AI | 大语言模型（OpenAI 兼容接口）、Embedding 模型（fastembed + ONNX） |
-| SSO | Keycloak、OIDC、OAuth 2.0、JWT、JWKS |
-| 关系数据库 | MySQL 8.x |
-| 向量数据库 | Milvus |
-| 向量检索 | `pymilvus` 官方客户端 |
-| 文件存储 | 本地目录，后期可升级 MinIO |
-| 部署 | Docker、Docker Compose、Nginx |
+| 前端 | Vue 2、Vue Router 3、Vuex、Axios、Element UI |
+| 后端 | Python 3.11、FastAPI、Pydantic v2 |
+| ORM / 迁移 | SQLAlchemy 2.0、Alembic |
+| 关系库 | MySQL 8.x |
+| 向量库 | Milvus（`pymilvus` 官方客户端） |
+| 嵌入模型 | `bge-small-zh-v1.5`（fastembed / ONNX，512 维，不需要 torch） |
+| 大模型 | 任意 OpenAI 兼容接口 |
+| 认证 | JWT（HS256）+ Keycloak 26 / OIDC / JWKS |
+| 测试 | pytest（820 个用例，全部进程内，不联网不花钱） |
 
-## 8. 系统架构
+> **没有使用 LangChain。** 工具层是自写的函数 + Pydantic Schema，文本切分也是自写的字符切分（512 字符 / 64 重叠）。原计划里写了 LangChain，实际实现时去掉了 —— 只为调几个函数引入一整套框架不值。
+
+## 5. 系统架构
 
 ```text
-                   Keycloak 统一认证
-                    /      |      \
-             生活管理端  分析端  管理后台
-                    \      |      /
-                       FastAPI
-           认证校验、业务服务、权限控制
-              /             |             \
-           MySQL      自研工具层          Milvus
-                            |
-                         大语言模型
+                     Keycloak 26（OIDC / JWKS）
+                      /                      \
+             life-web（8080）          admin-web（8082）
+         生活管理端 / SSO 登录        管理后台 / SSO 登录
+                      \                      /
+                       \                    /
+                        FastAPI（8000）
+              JWT 校验 · 权限控制 · 用户隔离
+                    /          |          \
+                 MySQL      自研工具层    Milvus
+                         10 个 AI 工具
+                               |
+                       OpenAI 兼容大模型
 ```
 
-## 9. 核心数据表
+### SSO 采用 BFF 模式
+
+浏览器只跟本项目后端打交道，`client_secret` 和换 token 都在后端完成。后端拿到 Keycloak 的 `id_token`、校验通过后，**签发原有的本地 JWT**。
+
+这样做的好处：`require_role`、两级管理员、前端请求拦截器**一行都不用改**。Keycloak 只回答「你是谁」，角色仍由本地 `users.role` 决定。
+
+```text
+/auth/sso/login?app=life-web
+  → 302 到 Keycloak 登录页
+  → /auth/sso/callback（换 token、验 id_token 签名、落库、签本地 JWT）
+  → 302 回发起方自己的 /sso/callback?token=…
+  → 前端读完立即把地址栏洗掉
+```
+
+- **多应用**：`OIDC_CLIENTS=life-web=life-web:<secret>;admin-web=admin-web:<secret>`，加第三个前端只改 `.env`
+- **静默探测**：登录页打开时带 `prompt=none` 问一次 Keycloak，已登录就无感进入；未登录返回 `login_required`，安静显示表单不弹红字
+- **统一退出**：`id_token` 存 `sessionStorage`，退出时走 Keycloak `end_session` 清会话，否则关掉本地 JWT 后静默探测又会把人登回来
+
+## 6. AI 助手设计
+
+### 10 个工具，写入必须确认
+
+| 工具 | 类型 | 用途 |
+|---|---|---|
+| `query_tasks` | 只读 | 查询当前用户待办 |
+| `query_expenses` | 只读 | 查询消费数据 |
+| `search_personal_documents` | 只读 | 检索个人知识库 |
+| `create_task` | 写入 | 创建待办 |
+| `update_task` | 写入 | 修改待办 |
+| `delete_task` | 写入 | 删除待办 |
+| `create_expense` | 写入 | 新增消费 |
+| `update_expense` | 写入 | 修改消费 |
+| `delete_expense` | 写入 | 删除消费 |
+| `add_shopping_item` | 写入 | 往清单加物品 |
+
+**只读工具立刻执行**，结果回灌给模型继续说话；**写入工具只出确认卡**，落 `ai_pending_actions` 表，用户点确认才写库。
+
+### 三条安全护栏
+
+1. **用户 ID 由服务端注入**，模型无权提供。工具函数签名里根本没有这个参数，模型编也编不出来。
+2. **写入必须先看图**。`create_task` / `create_expense` 等返回结构化预览，用户确认后才执行；确认带幂等，重复点不会记两笔。
+3. **改删要凭据**。`task_id` 只能来自 `query_tasks` 的返回，模型不能凭空猜一个 id。
+
+### 一个真实踩到的坑
+
+> Milvus 上 `insert` 之后 0 秒，`get` / `query` / `search` 会一起返回空，显式指定 `consistency_level="Strong"` 也不行，约 1 秒后才有数据。`search_chunks` 因此在首次检索为空时等 0.8 秒再查一次。
+
+## 7. 个人知识库 RAG
+
+实现要点：
+
+- 支持 PDF / DOCX / TXT，单文件 ≤ 20MB，按 `sha256` 去重
+- 正文**只存在 MySQL 的 `document_chunks` 表**，Milvus 只存向量 + `user_id` / `document_id` 两个过滤字段 —— 不把原文塞进向量库，删除和改切分都好办
+- 嵌入用本地 `bge-small-zh-v1.5`（fastembed / ONNX），第一次跑会下载模型，之后离线可用
+- 检索**强制带 `user_id` 过滤**，top_k=5，从根上杜绝跨用户检索
+- 回答附带 `references[]`（文档名 / 页码 / 片段 / 相似度），前端渲染来源卡片；引用**不落库**，只存在于当次响应
+
+## 8. 权限模型
+
+| 角色 | 说明 |
+|---|---|
+| `user` | 普通用户，管自己的数据 |
+| `vip` | 同 user（AI 每日额度已于 2026-11-10 取消，所有人不限次数） |
+| `admin` | 管理员，可进管理后台 |
+
+管理员分两级：
+
+- **根管理员**：全站唯一（`ADMIN_ROOT_USER_ID` 或库中 `id` 最小的 admin），唯一能授予/撤销管理员，且谁都不能改他。换根只能改库或 `.env`，界面无入口。
+- **普通管理员**：只能改普通用户和 VIP。
+
+**所有权限判定在后端。** 整个 `/admin` 路由组挂 `require_role("admin")`，前端守卫只负责体验；隐藏按钮不是安全边界。
+
+## 9. 数据库
+
+13 张表，核心：
 
 ```text
 users                用户
-tasks                待办事项
-expenses             消费记录
+tasks                待办（硬删）
+expenses             消费（硬删）
 budgets              预算
 shopping_lists       购物清单
 shopping_items       购物明细
-diet_records         饮食记录
-exercise_records     运动记录
-sleep_records        睡眠记录
-mood_records         心情记录
-diaries              生活日记
-documents            知识库文档
+documents            知识库文档（硬删）
 document_chunks      文档分块（正文唯一副本）
-async_tasks          后台任务记账
-chat_sessions        AI 会话
+chat_sessions        AI 会话（软删，deleted_at）
 chat_messages        AI 消息
 ai_pending_actions   AI 待确认动作
 ai_usage_logs        AI 调用计量（仅成本统计，不限流）
-operation_logs       操作日志（本期不建）
 ```
 
-> 删除语义：`tasks` / `expenses` / `documents` 为**硬删除**，`chat_sessions` 为软删除（`deleted_at`）。
-> 详见 `docs/数据库设计.md` §2.1。
+字段级定义见 [数据库设计](docs/数据库设计.md)。
 
-## 10. 项目目录
+## 10. 项目结构
 
 ```text
 life-ai-platform/
 ├── backend/                 FastAPI 后端
-│   └── app/
-├── life-web/                生活管理端（8080）
-├── analytics-web/           数据分析端（8081，未开工）
-├── admin-web/               系统管理后台（8082）
-├── keycloak/                Realm 和 Client 配置
-├── deploy/                  Docker、Nginx 和部署配置
-├── 需求规格说明书.md         完整需求报告
-└── README.md                项目总览
+│   ├── modules/lifeweb/     业务模块
+│   │   ├── ai/              AI 工具层、确认机制、会话
+│   │   ├── tasks/           待办
+│   │   ├── expenses/        消费
+│   │   ├── shopping/        购物
+│   │   ├── knowledge/       知识库 RAG
+│   │   └── dashboard/       首页统计
+│   ├── alembic/             数据库迁移
+│   └── tests/               820 个测试
+├── life-web/                生活管理端（Vue 2，8080）
+├── admin-web/               管理后台（Vue 2，8082）
+├── analytics-web/           数据分析端（空目录，未开工）
+├── keycloak/                Realm 配置（空目录）
+├── deploy/                  部署配置（空目录）
+├── docs/                    设计文档
+└── scripts/                 开发辅助脚本
 ```
 
-## 11. 版本迭代路线
+## 11. 本地运行
 
-开发遵循“小版本可运行、验收通过后再进入下一版”的原则。Keycloak 不是第一阶段的前置条件，而是最终版本的认证升级。
+### 前置
 
-### 开发准备阶段
+- Python 3.11+
+- Node.js 18+
+- MySQL 8.x
+- Milvus 2.x（知识库功能需要，不跑也能启动）
 
-目标：把需求转化为可以开始编码的设计。
+### 后端
 
-- 确定页面清单和导航结构。
-- 设计 MySQL 数据表及实体关系。
-- 设计 FastAPI 接口清单。
-- 确定前后端目录规范和环境变量。
-- 准备 Git 仓库和开发分支。
+```bash
+cd backend
+python -m venv .venv
+.venv\Scripts\activate          # Windows
+pip install -r requirements.txt
 
-完成标准：页面、数据表和接口的名称及职责明确，可以开始初始化工程。
+cp .env.example .env            # 然后填你自己的密钥
+alembic upgrade head
+uvicorn main:app --reload
+```
 
-### V1.0 基础生活管理版
+`.env` 关键项：
 
-目标：完成第一个可以独立运行的前后端版本。
+```ini
+DATABASE_URL=mysql+pymysql://root:password@127.0.0.1:3306/lifeai
+LLM_API_KEY=
+LLM_BASE_URL=
+LLM_MODEL=
 
-- 初始化 Vue 2、Vue Router 3、Vuex 和 Axios。
-- 初始化 FastAPI、SQLAlchemy、Alembic 和 MySQL。
-- 实现待办事项增删改查。
-- 实现消费记录增删改查。
-- 完成首页基础统计。
-- 使用固定测试用户，暂不实现正式登录。
+# SSO 全部留空即关闭 SSO，不影响账号密码登录
+OIDC_ISSUER=
+OIDC_CLIENTS=
+OIDC_FRONTEND_CALLBACKS=
+OIDC_REDIRECT_URI=
+```
 
-完成标准：用户可以在页面中管理待办和消费数据，刷新页面后数据仍保存在 MySQL 中。
+### 前端
 
-### V1.1 智能助手版
+```bash
+cd life-web && npm install && npm run serve     # 8080
+cd admin-web && npm install && npm run serve    # 8082
+```
 
-目标：将已经学习的 LangChain 应用到真实业务。
+### 测试
 
-- 接入大语言模型。
-- 实现 AI 对话页面和会话记录。
-- 从自然语言中提取待办信息。
-- 从自然语言中提取消费信息。
-- 为写入操作增加结构化预览和用户确认。
-- 封装查询待办、创建待办、查询消费和记录消费等工具。
+```bash
+cd backend
+pytest                     # 820 passed，约 3.5 分钟
+```
 
-完成标准：用户可以通过自然语言创建待办、记录消费和查询个人数据，写入前必须确认。
+## 12. 版本历程
 
-### V1.2 JWT 用户系统版
+| 版本 | 内容 | 状态 |
+|---|---|---|
+| V1.0 | 待办 + 消费的增删改查、首页统计 | ✅ |
+| V1.1 | AI 助手、工具层、确认机制 | ✅ |
+| V1.2 | JWT 用户系统、数据隔离 | ✅ |
+| V1.3 | Milvus RAG 个人知识库 | ✅ |
+| V1.4 | 购物清单、管理后台、两级管理员 | ⚠️ 部分（生活记录/图表/报表未做） |
+| V2.0 | Keycloak SSO、静默登录、统一退出 | ⚠️ 部分（Docker 部署、analytics-web 未做） |
 
-目标：由单用户演示系统升级为多用户系统。
+## 13. 文档
 
-- 实现注册、登录、退出和密码加密。
-- 使用 JWT Access Token 保护接口。
-- Axios 自动携带 Token。
-- Vue Router 增加登录状态检查。
-- 所有业务表关联当前用户。
-- 实现用户数据隔离和基础角色权限。
+- [需求规格说明书](需求规格说明书.md) — 完整需求（按计划写，部分未实现，以上文「未完成」清单为准）
+- [项目规划](docs/项目规划.md) — 技术决策、阶段任务、风险登记
+- [数据库设计](docs/数据库设计.md) — 表结构字段级定义（文档按 23 张表设计，实际落地 13 张）
+- [接口设计](docs/接口设计.md) — 接口、错误码与权限矩阵
+- [页面设计](docs/页面设计.md) — 路由表与交互规范
+- [工程规范](docs/工程规范.md) — 目录、依赖、环境变量、Git 工作流
+- [AI 设计](docs/AI设计.md) — 工具 Schema、上下文注入、确认机制、RAG 参数
 
-完成标准：不同用户只能访问自己的待办、消费和聊天数据，未登录用户不能访问受保护接口。
+## 14. 安全说明
 
-### V1.3 Milvus RAG 个人知识库版
+- `.env` 与所有密钥**从不进版本库**，仓库内只有 `.env.example`
+- `.git/hooks/pre-push` + `scripts/pre_push_secret_scan.py` 在每次推送前扫描 `sk-` 密钥、密钥赋值、复合 client 配置，命中即拒绝推送
+- 检索与所有业务查询都按 `user_id` 强制隔离
+- 密码用 bcrypt 哈希存储，JWT 不落 localStorage 以外的持久位置
 
-目标：完成个人资料上传和知识问答。
+> 本项目为学习实践项目，未经过生产级安全审计，**请勿直接用于生产环境**。
 
-- 支持上传 PDF、DOCX 和 TXT。
-- 保存文档信息和处理状态到 MySQL。
-- 保存原始文件到本地目录，后期可升级 MinIO。
-- ~~使用 LangChain 解析、清洗和切分文本~~ → 实际用 `pypdf` / `python-docx` / 自写字符切分（512 字符 / 64 重叠）。
-- 使用本地 `bge-small-zh-v1.5`（fastembed / ONNX）生成向量。
-- ~~通过 `langchain-milvus` 写入~~ → 实际用 `pymilvus` 直接写入集合 `kb_chunks`。
-- 检索时按 `user_id` 过滤（集合里只存 `id` / 向量 / `user_id` / `document_id`）。
-- 回答中展示文档名称和引用片段（含页码）。
-- 删除文档时同步清理 MySQL（硬删）、文件和 Milvus 数据。
+---
 
-完成标准：用户可以上传资料并基于自己的文档提问，系统能够返回带来源的答案，且不能检索其他用户的数据。
-
-**状态**：已完成。后端 4 个 `/knowledge` 接口 + 第 9 个工具 `search_personal_documents` + `references` 落库；
-前端 `/knowledge` 页面（上传、状态轮询、切块预览、删除）与对话页的来源卡片均已上线。
-
-### V1.4 数据分析与完善版
-
-目标：完善生活管理能力和产品体验。
-
-- 增加购物、预算、饮食、运动、睡眠、心情和日记模块。
-- 使用 ECharts 展示消费趋势、待办完成率和生活变化。
-- 生成生活周报和月报。
-- 增加异常处理和后台任务状态（审计日志本期不做）。
-- 完善表单校验、加载状态和移动端适配。
-- 补充单元测试和接口测试。
-
-完成标准：核心生活模块形成闭环，统计图表和周期报告能够根据真实数据生成。
-
-**状态**：进行中。已完成购物清单（前后端 + 第 10 个工具 `add_shopping_item`）与管理后台后端
-（`/admin/users`、`/admin/usage`、`/admin/roles`）；`admin-web` 的登录、「用户管理」、「AI 调用明细」、「角色说明」
-四页与 403 页已全部可用。饮食 / 运动 / 睡眠 / 心情 / 日记模块与 ECharts 图表未开工。
-
-#### 管理后台 `admin-web`（8082）
-
-| 页面 | 状态 |
-|---|---|
-| 登录 | 已完成，复用 `/auth/login`，只保留登录 tab（无注册）；密码错时弹后端原话「用户名或密码错误」 |
-| `/users` 用户管理 | 已完成：角色 / 状态 / 关键词筛选、分页（10/20/50）、行内「编辑」抽屉（改角色、启用禁用，二次确认） |
-| `/roles` 角色说明 | 已完成：三张卡片读 `GET /admin/roles`，文案全部来自后端，前端不留常量 |
-| `/usage` AI 调用明细 | 已完成：四张合计卡（次数 / 输入 / 输出 / 费用）、今天 / 昨天 / 近 7 天 / 近 30 天 / 全部与自定义区间、状态与用户筛选、分页（10/20/50/100） |
-| `/403` 无权访问 | 已完成：非管理员落地页，给「换个账号」「去生活助手」两个出口 |
-
-路由守卫按角色放行：判据顺序为 Vuex `user.role` → localStorage 上次登录角色 → 先放行等 `/auth/me` 回来再纠正，
-非管理员访问后台页面跳 `/403`。前端守卫只管体验，真正的权限在后端 `require_role("admin")`。
-
-后端的护栏前端不重复实现：改自己被拒、动根管理员被拒、普通管理员越权被拒，
-都由后端返回 `422`（`code` 区分 `ROOT_PROTECTED` / `CANNOT_GRANT_ADMIN` /
-`CANNOT_TOUCH_ADMIN`），前端把 `message` 原样弹出。
-
-管理员分两级（V1.4）：**根管理员**（全站一个，`ADMIN_ROOT_USER_ID` 或在库里取
-`id` 最小的 admin）唯一能做「授予/撤销管理员」，且任何人都不能改他；
-**普通管理员**只能改普通用户和 VIP。换根只能改库或 `.env`，界面没有这个入口。
-
-管理员判定完全在后端：整个 `/admin` 路由组挂 `require_role("admin")`，非管理员访问得到 `403 FORBIDDEN`。
-前端只是把 403 翻译成一句人话，并在顶栏标出当前角色 —— 隐藏按钮不是安全边界。
-
-### V2.0 Keycloak SSO 最终版
-
-目标：在完成 Keycloak 学习后，将普通 JWT 登录升级为统一身份认证。
-
-- [x] 部署并配置 Keycloak（Rocky9 虚拟机上跑 `quay.io/keycloak/keycloak:26.4.0`，端口 8180）。
-- [x] 学习并应用 OAuth 2.0、OIDC 和 Authorization Code + PKCE。
-- [x] 配置生活管理端、数据分析端和管理后台三个 OIDC Client（已完成 `life-web`、`admin-web`，`analytics-web` 待建）。
-- [ ] FastAPI 使用 JWKS 验证 Keycloak Access Token（**改为 BFF 模式**，见下；id_token 已用 JWKS 验 RS256）。
-- [x] 实现 `user`、`vip`、`admin` 角色权限（V1.4 已完成两级管理员）。
-- [x] 实现多应用单点登录（两个前端已无感互通）。
-- [x] 实现统一退出（一次退出，两个前端的 Keycloak 会话一起失效）。
-- [ ] 使用 Docker Compose 管理 MySQL、Milvus、Keycloak 和后端服务。
-- [ ] 完成安全测试、部署文档和演示数据。
-
-**接入方式：BFF 模式**（2026-11-14 实现）。浏览器只跟本项目的后端打交道，
-`client_secret` 与换 token 全在后端完成；后端拿到 Keycloak 的 `id_token` 校验通过后
-**签发原有的本地 JWT**。这样 `require_role`、两级管理员、前端请求拦截器一行都不用改，
-Keycloak 只负责回答「你是谁」，角色仍然由本地 `users.role` 决定。
-
-链路：`/api/v1/auth/sso/login?app=life-web`（302 去 Keycloak）→ Keycloak 登录 → `/api/v1/auth/sso/callback`
-（换 token、验 id_token、落本地用户、签本地 JWT）→ 302 回**发起方自己的** `/sso/callback?token=…`，
-前端读完令牌立刻把地址栏洗掉。账号密码登录继续可用，两条路并存。
-
-多应用：每个前端在 Keycloak 里是独立客户端（`life-web` 8080、`admin-web` 8082），
-后端用一张表收下它们：`OIDC_CLIENTS=life-web=life-web:<secret>;admin-web=admin-web:<secret>`，
-再加 `OIDC_FRONTEND_CALLBACKS` 指定各自回到哪个前端。哪个前端发起的，就只从 Cookie
-票据里认这一份（回调 URL 上的 `?app=` 不参与决策）。加第三个前端只改 `.env`，代码不动。
-
-配置在 `backend/.env`：`OIDC_ISSUER`、`OIDC_CLIENTS`、`OIDC_FRONTEND_CALLBACKS`、
-`OIDC_REDIRECT_URI`（都留空即关闭 SSO）。回调统一走 `http://localhost:8080/api/v1/auth/sso/callback`，
-因为 `OIDC_REDIRECT_URI` 必须与 Keycloak 客户端里登记的那条逐字一致，而 Keycloak 只认
-浏览器能到达的地址。
-
-**无感登录（静默探测）**：真正的单点登录要解决「在 A 应用登录过，打开 B 应用不该再点一次按钮」。
-两个前端的登录页**一打开就先静默问一次账号中心**：`/auth/sso/login?...&silent=true`，
-后端在授权 URL 上带 `prompt=none`，Keycloak 已登着就直接回 `code`（用户看不到登录框），
-没登着就回 `error=login_required`，后端翻译成 `sso_silent`，前端安静地显示本地表单、不弹红字。
-前端用 `sessionStorage` 记「本标签页已探过」，避免「没登着 → 弹回登录页 → 又探」的死循环。
-退出登录时会清掉这个标记，所以换账号不会被挡住。
-
-**统一退出**：只清本地 JWT 是不够的 —— 浏览器里 Keycloak 的 `KEYCLOAK_SESSION` 还在，
-下一次打开任何一个前端，静默探测都会成功，用户会觉得「退不出去」。所以两个前端的
-退出都改成：清本地 token → 整页跳到 `/api/v1/auth/sso/logout/confirm?app=…&id_token=…`
-→ 后端 302 到 Keycloak `end_session` 清会话 → Keycloak 302 回该应用的登录页。
-`id_token` 由回调时一并交给前端，存在 `sessionStorage`（只用于退出，不进 localStorage）。
-退出之后再打开任何前端，静默探测只会得到 `sso_silent`，安静显示登录表单。
-
-完成标准：登录一个子应用后可无感访问其他已授权子应用；统一退出后所有子应用会话失效；项目可以按照部署文档完整启动。
-
-## 12. 当前 MVP 范围
-
-当前只执行 V1.0，范围包括：
-
-- Vue 2 与 FastAPI 基础工程
-- MySQL 数据库连接和迁移
-- 待办事项增删改查
-- 消费记录增删改查
-- 首页基础统计
-- 固定测试用户
-
-LangChain、JWT、Milvus RAG 和 Keycloak 分别在后续版本加入，不作为 V1.0 的完成前提。
-
-## 13. 文档入口
-
-- 完整需求规格说明书：[`需求规格说明书.md`](需求规格说明书.md)（需求以它为准）
-- 执行基线：[项目规划](docs/项目规划.md)（技术决策、阶段任务、版本矩阵、风险登记）
-- 设计与规范（执行以这些为准）：
-  - [数据库设计](docs/数据库设计.md) — 23 张表字段级定义
-  - [接口设计](docs/接口设计.md) — 约 105 个端点、错误码与权限矩阵
-  - [页面设计](docs/页面设计.md) — 三端路由表与交互规范
-  - [工程规范](docs/工程规范.md) — 目录、依赖版本、环境变量、Git 工作流
-  - [AI 设计](docs/AI设计.md) — 工具 Schema、上下文注入、确认机制、RAG 参数
-
-## 14. 当前状态
-
-### 开发准备阶段（S0）
-
-- [x] 项目方向确认
-- [x] 初版需求分析
-- [x] 项目目录创建
-- [x] Git 仓库初始化、分支与 `.gitignore`
-- [x] 技术决策确认（[项目规划](docs/项目规划.md) D1～D15）
-- [x] MySQL 数据库设计（23 张表）
-- [x] FastAPI 接口设计（约 105 个端点）
-- [x] 页面清单与路由设计
-- [x] 工程规范与环境变量清单
-- [x] AI 契约设计（工具 Schema、注入约定、确认幂等、RAG 参数）
-- [ ] V1.0 页面低保真原型
-
-### 版本进度
-
-- [x] V1.0 基础生活管理版
-- [x] V1.1 LangChain 智能助手版（10 个工具全部落地）
-- [x] V1.2 JWT 用户系统版
-- [x] V1.3 Milvus RAG 个人知识库版
-- [ ] V1.4 数据分析与完善版（购物已完成 / 管理后台后端 + admin-web 四页已完成 / 生活记录、日记、ECharts 待做）
-- [ ] V2.0 Keycloak SSO 最终版
+**License**：未指定许可证，保留所有权利。
