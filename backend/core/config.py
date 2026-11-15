@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     # 向量库跑在虚拟机里的 Milvus standalone（Windows 上没装 docker，
     # 而 Milvus 常驻要 1–2GB，本机内存本来就紧）。默认值指向开发环境的那台；
     # 换机器就改 .env 的 VECTOR_URI。
-    vector_uri: str = "http://192.168.88.134:19530"
+    vector_uri: str = "http://127.0.0.1:19530"
     vector_db: str = "lifeai"
     vector_collection: str = "kb_chunks"
     # 嵌入模型：本地 fastembed 缓存里已有 ONNX 权重，不用联网下载、不装 torch。

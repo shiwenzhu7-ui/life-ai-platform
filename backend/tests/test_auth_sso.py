@@ -496,7 +496,7 @@ SSO_LOGOUT_CONFIRM = f"{API}/auth/sso/logout/confirm"
 
 
 def test_logout_confirm_redirects_to_keycloak_end_session(client, sso_env):
-    # 不跟随即 302：浏览器能跟，TestClient 跟了就会去打 192.168.88.134
+    # 不跟随即 302：浏览器能跟，TestClient 跟了就会去打 Keycloak 的地址
     res = client.get(
         f"{SSO_LOGOUT_CONFIRM}?app=life-web&id_token=abc.def.ghi",
         follow_redirects=False,
@@ -520,9 +520,36 @@ def test_logout_confirm_uses_client_of_the_calling_app(client, sso_env):
     assert "post_logout_redirect_uri=http%3A%2F%2Flocalhost%3A8082%2Flogin" in url
 
 
-def test_logout_without_id_token_falls_back_to_login(client, sso_env):
-    # 没有 id_token（比如账号密码登录、或者升级前的旧会话）：Keycloak 退不掉，
-    # 但人必须被送回登录页，不能卡在半路
+def test_logout_without_id_token_still_visits_keycloak(client, sso_env):
+    # 没有 id_token（比如账号密码登录、或者升级前的旧会话）：仍要去 Keycloak 走一趟。
+    # 实测只带 client_id + post_logout_redirect_uri、不带 id_token_hint，Keycloak
+    # 照样会清 KEYCLOAK_SESSION —— 少了这一跳，另一个前端的静默探测还能成功，
+    # 用户会以为「退出后台了，life-web 还登着」。
+    res = client.get(f"{SSO_LOGOUT_CONFIRM}?app=admin-web", follow_redirects=False)
+    assert res.status_code == 302
+    url = res.headers["location"]
+    assert url.startswith("http://kc.test/realms/lifeai/protocol/openid-connect/logout")
+    assert "client_id=admin-web" in url
+    assert "post_logout_redirect_uri=http%3A%2F%2Flocalhost%3A8082%2Flogin" in url
+    assert "id_token_hint" not in url
+
+
+def test_logout_confirm_builds_absolute_redirect(client, sso_env):
+    # Keycloak 只认绝对 URL；相对路径会换来一张 400「无效重定向uri」白页
+    res = client.get(
+        f"{SSO_LOGOUT_CONFIRM}?app=admin-web&id_token=abc&redirect=%2Flogin",
+        follow_redirects=False,
+    )
+    url = res.headers["location"]
+    params = parse_qs(urlparse(url).query)
+    assert params["post_logout_redirect_uri"] == ["http://localhost:8082/login"]
+
+
+def test_logout_without_id_token_falls_back_when_oidc_not_configured(
+    client, monkeypatch, sso_env
+):
+    # 没配 issuer 时就只能退化：把人送回登录页，而不是 500
+    monkeypatch.setattr(settings, "oidc_issuer", "")
     res = client.get(f"{SSO_LOGOUT_CONFIRM}?app=admin-web", follow_redirects=False)
     assert res.status_code == 302
     assert res.headers["location"] == "http://localhost:8082/login"

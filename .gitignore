@@ -60,6 +60,13 @@ desktop.ini
 # ---------- 日志与临时文件 ----------
 logs/
 *.log
+# 各前端本地的 .env.development / .env.production（代理地址、端口可能含内网信息）
+life-web/.env.*
+admin-web/.env.*
+analytics-web/.env.*
+# 本地截图 / 演示图，不随仓库走
+_demo/
+screenshots/
 tmp/
 temp/
 dsh-acl-recovery/
