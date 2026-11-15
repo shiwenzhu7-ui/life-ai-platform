@@ -123,11 +123,9 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
 | 8 | `delete_expense` | 写入需确认 | V1.1 ✅ | 建草稿（确认后硬删） |
 | `search_personal_documents` | 只读 | V1.3 ✅ | Milvus 检索 + MySQL 取正文 |
 | 9 | `add_shopping_item` | 写入需确认 | V1.4 ✅ | 建草稿（确认后写 `shopping_items`） |
-| — | `query_life_records` | 只读 | V1.4 | 直接查 DB |
-| — | `generate_life_report` | 生成 | V1.4 | 建 `async_tasks` |
 
 > 实际落地 10 个：V1.1 做了 7 个（含表里原未列出的 update/delete 四个），V1.3 加检索，
-> V1.4 加 `add_shopping_item`；后两个属 V1.4 未做。
+> V1.4 加 `add_shopping_item`。
 > 代码位置：`backend/modules/lifeweb/ai/tools.py` 的 `ALL_TOOLS`；
 > `READ_ONLY_TOOLS` = `query_tasks` / `query_expenses` / `search_personal_documents`。
 
