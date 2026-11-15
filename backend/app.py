@@ -4,9 +4,12 @@
 业务代码一律不放这里。
 
 启动（在 backend/ 目录下）：
-    .\.venv\Scripts\python.exe -m uvicorn app:app --reload --port 8000
+    .\.venv\Scripts\python.exe -m uvicorn app:app --reload --port 8010
 文档：
-    http://127.0.0.1:8000/docs
+    http://127.0.0.1:8010/docs
+
+注意：入口模块名是 `app`（backend/app.py），不是 `main`；
+端口用 8010，两个前端的 vue.config.js 都代理到这个端口。
 """
 
 from fastapi import FastAPI

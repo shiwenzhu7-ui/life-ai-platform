@@ -204,12 +204,16 @@ life-ai-platform/
 cd backend
 python -m venv .venv
 .venv\Scripts\activate          # Windows
-pip install -r requirements.txt
 
-cp .env.example .env            # 然后填你自己的密钥
+pip install -r requirements.txt
+copy .env.example .env          # 然后填你自己的密钥
 alembic upgrade head
-uvicorn main:app --reload
+python -m uvicorn app:app --reload --port 8010
 ```
+
+接口文档：<http://127.0.0.1:8010/docs>
+
+> 入口模块是 `app`（`backend/app.py`），不是 `main`；端口 8010 与两个前端的代理配置一致。
 
 `.env` 关键项：
 

@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     app_name: str = "LifeAI"
     app_env: str = "dev"
     debug: bool = True
-    port: int = 8000
+    port: int = 8010
     api_v1_prefix: str = "/api/v1"
 
     # ---------- 数据库 ----------
