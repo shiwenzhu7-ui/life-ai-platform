@@ -132,8 +132,11 @@ export default {
     if (typeof next === 'string' && this.pickTarget(next)) this.redirectFallback = next
 
     if (ssoError) {
-      // 账号中心的静默探测已经试过了，这次显示表单等用户自己动手
-      clearSilentTried()
+      // 试过了：显示表单等用户自己动手。
+      // 注意**不能 clearSilentTried()** —— /sso/callback 上点「回登录页」也会走到
+      // 这里，清了标记就会「/login → 静默探测 → /sso/callback → 回登录页 → …」死循环，
+      // 用户看到的是「点了回登录页没反应」。
+      markSilentTried()
       // 静默探测没登着、或后端没配 SSO，都不该弹红字
       if (!isQuietSsoError(ssoError)) this.$message.error(ssoErrorText(ssoError))
       return
@@ -153,6 +156,17 @@ export default {
       if (!target || typeof target !== 'string') return ''
       if (!target.startsWith('/') || target.startsWith('//')) return ''
       return target
+    },
+
+    // 登录成功离开登录页：**整页跳**，不走 this.$router.replace。
+    //
+    // SPA 换路由时，浏览器历史里登录页那一格还在。登录之后按 ← 就会退回
+    // /login —— 令牌还在，守卫又把人弹回后台，看起来就是「按了没反应」。
+    // 浏览器没有 API 能删掉历史里中间的某一格，所以在栈上修只会越补越漏。
+    // 整页导航（location.replace）把当前这一格直接换成目标页，文档重新加载，
+    // 历史栈从此是干净的。用 replace 而不是 href：不能再加一格。
+    leaveTo(target) {
+      window.location.replace(target)
     },
 
     validate() {
@@ -176,7 +190,8 @@ export default {
         })
         this.$message.success('登录成功')
         this.$store.dispatch('user/fetchMe')
-        await this.$router.replace(this.redirectTarget)
+        // 整页跳，不走 this.$router.replace —— 见 leaveTo 的说明
+        this.leaveTo(this.redirectTarget)
       } catch (error) {
         // 失败文案已由 request.js 统一弹出（后端原话）
       } finally {
@@ -186,12 +201,19 @@ export default {
 
     // 整页跳走，不走 axios：Keycloak 要接管整个浏览器
     onSsoLogin() {
+      // 用户主动要走账号中心：清掉「静默探测已试过」标记。
+      // 清完再跳走，就算这次失败回到 /login?sso_error=…，标记也由 created 重新记上，
+      // 不会自动再探一次又把人甩去账号中心。
+      clearSilentTried()
       redirectToSsoLogin(this.redirectTarget)
     },
 
     // 静默探测时用户等不及，点「改用账号密码登录」：停掉转圈直接给表单
     stopAutoCheck() {
       this.autoChecking = false
+      // 用户明确要手工登录：把「探测过」的标记清掉（路由守卫不再替我们清），
+      // 否则下次再进登录页会被人记成「已经探过」，永远不自动进了
+      clearSilentTried()
     }
   }
 }

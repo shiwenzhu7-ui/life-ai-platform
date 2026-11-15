@@ -257,28 +257,34 @@ def decode_id_token(id_token: str, *, app: str, nonce: str) -> dict[str, Any]:
 def build_logout_url(*, app: str, id_token: str, post_logout_redirect: str) -> str:
     """拼 Keycloak 的退出地址（RP-Initiated Logout）。
 
-    三个参数缺一不可，少一个 Keycloak 的行为就不对：
-        id_token_hint            告诉 Keycloak「退的是谁的会话」。没有它，Keycloak
-                                 只能退「浏览器当前带的那个会话」—— 在同时开了两个
-                                 应用时会退错人，而且它也无法确认请求来自合法客户端。
+    参数分工：
+        id_token_hint            告诉 Keycloak「退的是谁的会话」。有它时 Keycloak
+                                 会先校验 aud 与 client_id 是否一致，不一致直接
+                                 400「无效重定向uri」。
         post_logout_redirect_uri 退出后把浏览器送到哪。**必须事先在客户端的
                                  「有效的注销后重定向URI」里登记过**，否则 Keycloak
                                  会报 Invalid redirect uri 并停在一个白页上。
-        client_id                仅用于 Keycloak 认出是哪个客户端在请求退出。
+                                 必须是**完整 URL**（带 scheme + host），相对路径
+                                 一定会被拒。
+        client_id                认出是哪个客户端在请求退出，也是白名单的索引。
 
-    没有 id_token_hint 时**不要**退回只给 post_logout_redirect_uri：Keycloak 会
-    忽略那个参数直接停在「你已退出」页，用户看到的是 Keycloak 的英文页面。
+    没有 id_token 时**照样去 Keycloak**：实测带 client_id +
+    post_logout_redirect_uri、不带 id_token_hint，Keycloak 仍会清掉浏览器里的
+    KEYCLOAK_SESSION 再 302 回来。少了这一步，「退出后台、life-web 还登着」
+    就会复现 —— 因为 life-web 的静默探测靠的就是那个 Cookie。
 
     没配 issuer 时返回空串，由调用方决定退化成「只退本地」。
     """
-    if not settings.oidc_issuer.strip() or not id_token:
+    if not settings.oidc_issuer.strip():
         return ""
-    params = {"id_token_hint": id_token, "post_logout_redirect_uri": post_logout_redirect}
+    # 没有 client_id 就认不出客户端，白名单无从校验，Keycloak 也不会清会话
     try:
         client_id, _ = client_credentials(app)
-        params["client_id"] = client_id
     except AppError:
-        pass  # app 没配也别拦：id_token_hint 已经足够 Keycloak 认出客户端
+        return ""
+    params = {"client_id": client_id, "post_logout_redirect_uri": post_logout_redirect}
+    if id_token:
+        params["id_token_hint"] = id_token
     return f"{_endpoint('/logout')}?{urlencode(params)}"
 
 

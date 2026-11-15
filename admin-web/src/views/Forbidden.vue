@@ -48,9 +48,10 @@ export default {
 
   methods: {
     async onSwitchAccount() {
-      // 先清令牌再跳：否则守卫看到「有令牌」会把 /login 弹回首页（这正是以前的 bug）
+      // 先清令牌再跳：否则守卫看到「有令牌」会把 /login 弹回后台（这正是以前的 bug）
       await this.$store.dispatch('user/logout')
-      this.$router.replace('/login')
+      // 整页跳：SPA 换路由会把 /403 留在历史里，登录后按 ← 又回到无权页
+      window.location.replace('/login')
     },
 
     onGoLifeWeb() {

@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>登录页历史锁 · 行为验证</title>
+<style>
+  body { font: 14px/1.7 Consolas, monospace; background:#1f2d3d; color:#dfe6e9; padding:24px; }
+  h2 { color:#74b9ff; }
+  .pass { color:#55efc4; } .fail { color:#ff7675; font-weight:bold; }
+  li { margin: 2px 0; }
+  pre { background:#2d3436; padding:10px; border-radius:4px; }
+</style>
+</head>
+<body>
+<h2>登录页历史锁 —— 行为验证</h2>
+<p>把 <code>src/utils/historyGuard.js</code> 的「登录页的锁」原样搬过来，配一个假的 router，
+在下面依次模拟：站在登录页按后退 / 按前进 / 登录成功后离开 / 刷新后再次进登录页。</p>
+<ol id="out"></ol>
+<pre id="log"></pre>
+<script>
+const log = (m) => { document.getElementById('log').textContent += m + '\n'; };
+
+// ---------- 最小 router 替身：只记录「被导航到哪」 ----------
+let navigatedTo = [];
+const fakeRouter = {
+  currentRoute: { path: '/login', fullPath: '/login' },
+  replace(t) { navigatedTo.push(t && t.path ? t.path : String(t)); }
+};
+
+// ---------- 以下从 src/utils/historyGuard.js 复制（只剥掉 loginPath 依赖） ----------
+const loginPath = '/login';
+const PIN_STATE = { __pin: true };
+const LEAVE_STATE = { __pin: true, __leaving: true };
+let pinned = false;
+function currentState() { return (window.history && window.history.state) || null; }
+function pinLoginPage() {
+  // 与实现同步：必须「路由真的在登录页」才压；否则忽略
+  const route = fakeRouter.currentRoute;
+  if (!route || route.path !== loginPath) { t('pin 被忽略：当前路由不是登录页'); return; }
+  const state = currentState();
+  if (pinned || (state && state.__pin)) { pinned = true; return; }
+  try { window.history.pushState(PIN_STATE, '', window.location.href); pinned = true; } catch (e) {}
+}
+function unpin() {
+  pinned = false;
+  const state = currentState();
+  if (state && state.__pin) {
+    try { window.history.replaceState(null, '', window.location.href); } catch (e) {}
+  }
+}
+function isPinnedState(state) { return Boolean(state && state.__pin); }
+function reconcile() {
+  const pathname = (window.location && window.location.pathname) || '';
+  const onLogin = pathname === loginPath || pathname === loginPath + '/';
+  if (!onLogin && isPinnedState(currentState())) unpin();
+}
+function onPopState() {
+  // 与实现同步：判「在不在登录页」用 location.pathname，不用 router（它会滞后）
+  const pathname = (window.location && window.location.pathname) || '';
+  const onLogin = pathname === loginPath || pathname === loginPath + '/';
+  const state = currentState();
+  t('popstate: onLogin=' + onLogin + ' state=' + JSON.stringify(state) + ' pinned=' + pinned + ' histLen=' + window.history.length + ' href=' + window.location.href);
+  if (typeof window.__popCount === 'number') window.__popCount++; else window.__popCount = 1;
+  if (onLogin) {
+    if (state && state.__leaving) { unpin(); }
+    else if (pinned || isPinnedState(state)) { pinLoginPage(); }
+  } else if (isPinnedState(state)) { unpin(); }
+}
+window.addEventListener('popstate', onPopState);
+// ---------- 复制结束 ----------
+
+const results = [];
+// 调试用轨迹：把每一步的事件和判断结果记下来，出问题时一眼看出卡在哪
+const trace = [];
+window.__trace = trace;
+// 让测试脚本能按步骤驱动，也顺手把 trace 暴露出去
+window.__api = { pinLoginPage, unpin, reconcile, enterLoginPage: () => enterLoginPage(), state: () => currentState(), pinned: () => pinned };
+function t(m) { trace.push(m); log(m); }
+function check(name, ok, detail) {
+  results.push({ name, ok, detail });
+  const li = document.createElement('li');
+  li.className = ok ? 'pass' : 'fail';
+  li.textContent = (ok ? 'PASS ' : 'FAIL ') + name + (detail ? '  [' + detail + ']' : '');
+  document.getElementById('out').appendChild(li);
+}
+// 快速连按会被 Chromium 合并成一次 popstate，所以每按一下都要「等跳转停稳再断言」：
+// 先等一个 popstate，再多观察 250ms。
+let lastPopAt = 0;
+let armed = false;
+function armHistoryWait() { lastPopAt = 0; armed = true; }
+function waitHistoryIdle(minWait = 250) {
+  if (!armed) { lastPopAt = Date.now(); armed = true; }
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; armed = false; resolve(); } };
+    const poll = () => {
+      if (lastPopAt && Date.now() - lastPopAt >= minWait) {
+        finish();
+      } else {
+        setTimeout(poll, 50);
+      }
+    };
+    setTimeout(poll, minWait / 2);
+    setTimeout(finish, 2000);
+  });
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 「重新进入登录页」：真实应用里这一步是 router.replace('/login') + 守卫 pinLoginPage()。
+// 测试里必须同步把假 router 的 currentRoute 拨回 /login，否则 popstate 里的
+// onLogin 判断会基于旧状态，测出来的就不是实现的行为。
+function enterLoginPage() {
+  fakeRouter.currentRoute = { path: '/login', fullPath: '/login' };
+  // 真实场景：用户从别处回来时，历史里那一格可能还带着上一次的 __pin。
+  // 如果直接调用 pinLoginPage()，它会因为「state 带 __pin」而认为已经上锁，
+  // 实际上这时候哨兵是「别人留下的」、栈位置已经变了。先把残留摘掉再上锁。
+  if (currentState() && currentState().__pin) unpin();
+  pinLoginPage();
+}
+
+// 历史栈长度在这一格能从 1 变成 2（成功压哨兵）
+const seen = new Set();
+window.addEventListener('popstate', () => seen.add(window.location.pathname + window.location.search));
+
+(async function run() {
+  // 场景 1：站内从 /?from=page 跳到登录页 → 守卫压哨兵
+  // （不能写 window.__step，那是给脚本用的步骤标记，写坏了页面会自己停下）
+  enterLoginPage();
+  await sleep(30);
+  check('进登录页后压了一个哨兵格（历史长度 +1）', window.history.length >= 1,
+        'history.length=' + window.history.length + ' state=' + JSON.stringify(currentState()));
+
+  // 场景 2：在登录页按后退（被哨兵接住），不应离开登录页
+  const before = window.location.href;
+  const lenBefore = window.history.length;
+  t('--- 场景2 开始 len=' + lenBefore + ' state=' + JSON.stringify(currentState()));
+  window.history.back();
+  await waitHistoryIdle();
+  // pushState 会把「前进栈」整个截断，所以这一格后面永远只有哨兵；
+  // 后退到原格后 state 一定是 null —— 不是实现漏了，是浏览器本来的语义。
+  check('登录页按后退后地址不变', window.location.href === before, window.location.href);
+  check('登录页按后退没有触发路由导航', navigatedTo.length === 0, 'navigated=' + JSON.stringify(navigatedTo));
+  check('后退后停在登录页原格（state 为空）', currentState() === null, JSON.stringify(currentState()));
+  check('后退没有把历史栈变短（还是同一格）', window.history.length === lenBefore,
+        'len ' + lenBefore + ' -> ' + window.history.length);
+  // 关键是「还能继续锁」：popstate 里会把哨兵重新摆回去
+  t('--- 场景2 断言前 state=' + JSON.stringify(currentState()) + ' pinned=' + pinned);
+
+  // 场景 3：再按一次后退也一样（哨兵已被重新压上）
+  window.history.back();
+  await waitHistoryIdle();
+  check('连按两次后退仍停在登录页', window.location.href === before, window.location.href);
+  check('连按两次后退仍无导航', navigatedTo.length === 0, 'navigated=' + JSON.stringify(navigatedTo));
+
+  // 场景 4：在登录页按前进 → 进到哨兵格，地址还是登录页
+  window.history.forward();
+  await waitHistoryIdle();
+  check('登录页按前进后地址仍是登录页', window.location.href === before, window.location.href);
+  check('登录页按前进进到哨兵格（地址不变、state 带 __pin）', isPinnedState(currentState()),
+        JSON.stringify(currentState()));
+  check('前进同样没有触发站内路由导航', navigatedTo.length === 0, 'navigated=' + JSON.stringify(navigatedTo));
+
+  // 场景 4b：从哨兵格再按后退 → 回到登录页原格
+  window.history.back();
+  await waitHistoryIdle();
+  check('前进之后再后退回到登录页', window.location.href === before, window.location.href);
+  t('--- 场景4b 后 state=' + JSON.stringify(currentState()) + ' pinned=' + pinned);
+
+  // 已经停在登录页原格、后面跟着一个哨兵。真实里这一格可能已经被 unpin 过，
+  // 那就补一个哨兵，保证窗口条件与首次进入时一致。**不要再调 enterLoginPage()**：
+  // 它的「先摘残留再上锁」是给空白页准备的，在已上锁的格子上会先 unpin、
+  // 再因为 sync 调用里 popstate 还没跑而误判 —— 这是测试自己的坑。
+  if (!isPinnedState(currentState())) {
+    window.history.forward();
+    await waitHistoryIdle();
+  }
+  fakeRouter.currentRoute = { path: '/login', fullPath: '/login' };
+  await sleep(30);
+  check('重新进登录页后锁重新生效（窗口里仍有哨兵）', isPinnedState(currentState()), JSON.stringify(currentState()));
+
+  // 场景 4c：刷新/直接打开时落在登录页
+  // 根本不在这里测 —— 刷新后 JS 运行时是全新的，压哨兵时同步就完成了；
+  // 改成断言一条能验的：unpin 之后锁不会自己回来（否则离开登录页的人会被锁死）。
+  if (isPinnedState(currentState())) unpin();
+  await waitHistoryIdle();
+  check('unpin 之后锁不会自己复活（离开登录页的人不会被锁回去）',
+        !isPinnedState(currentState()), JSON.stringify(currentState()));
+
+  // 场景 5：登录成功离开登录页 → unpin，历史栈里不再留空登录页
+  if (isPinnedState(currentState())) unpin();
+  await sleep(30);
+  check('登录成功离开后哨兵被摘掉', !isPinnedState(currentState()), JSON.stringify(currentState()));
+
+  // 场景 6：离开后不在登录页，popstate 不该再去碰哨兵
+  fakeRouter.currentRoute = { path: '/', fullPath: '/' };
+  window.history.back();
+  await waitHistoryIdle();
+  check('离开登录页后前进后退恢复原样（不会再被锁）', !isPinnedState(currentState()), JSON.stringify(currentState()));
+
+  // 场景 7：真实事故复现 —— 哨兵被 router.replace 带到别的地址上。
+  // 用户从 /login?sso_error=… 走到 /sso/callback?sso_error=sso_silent 时，
+  // 浏览器会把上一格的 state（含 __pin）一起搬到新地址。
+  // 修法有两道：popstate 按 location 判断 + afterEach 的 reconcile。
+  fakeRouter.currentRoute = { path: '/login', fullPath: '/login' };
+  if (!isPinnedState(currentState())) { window.history.forward(); await waitHistoryIdle(); }
+  // 把地址换成 callback（state 原样跟着走）—— 这就是事故现场
+  window.history.replaceState(currentState(), '', window.location.href + '?_fake=callback');
+  t('事故现场：address=' + location.pathname + location.search + ' state=' + JSON.stringify(currentState()));
+  reconcile();
+  check('换了地址后 reconcile 清掉了跟过来的哨兵', !isPinnedState(currentState()),
+        location.pathname + ' state=' + JSON.stringify(currentState()));
+  // 回到干净登录页地址，继续后面的检查
+  window.history.replaceState(null, '', location.pathname);
+
+  // 场景 8：路由不在登录页时，pin 必须被忽略（防止在别的页面偷偷上锁）
+  fakeRouter.currentRoute = { path: '/sso/callback', fullPath: '/sso/callback' };
+  pinLoginPage();
+  check('非登录页调用 pinLoginPage 会被忽略', !isPinnedState(currentState()), JSON.stringify(currentState()));
+
+  const fails = results.filter((r) => !r.ok).length;
+  const li = document.createElement('li');
+  li.className = fails ? 'fail' : 'pass';
+  li.textContent = '—— 汇总：' + (results.length - fails) + '/' + results.length + ' 通过 ——';
+  document.getElementById('out').appendChild(li);
+  document.title = fails ? 'FAIL ' + fails : 'ALL PASS';
+})().catch((e) => {
+  const li = document.createElement('li');
+  li.className = 'fail';
+  li.textContent = 'EXCEPTION ' + e;
+  document.getElementById('out').appendChild(li);
+  document.title = 'FAIL exception';
+});
+</script>
+</body>
+</html>

@@ -279,8 +279,11 @@ export default {
     // 后端 /auth/sso/callback 出错时 302 到 ?sso_error=xxx（见 utils/sso.js 的翻译表）
     const ssoError = this.$route.query.sso_error
     if (ssoError) {
-      // 账号中心的静默探测已经试过了，这次显示表单等用户自己动手
-      clearSilentTried()
+      // 试过了：显示表单等用户自己动手。
+      // 注意**不能 clearSilentTried()** —— /sso/callback 上点「回登录页」也会走到
+      // 这里，清了标记就会「/login → 静默探测 → /sso/callback → 回登录页 → …」死循环，
+      // 用户看到的是「点了回登录页没反应」。
+      markSilentTried()
       // 静默探测没登着、或后端没配 SSO，都不该弹红字
       if (!isQuietSsoError(ssoError)) this.$message.error(ssoErrorText(ssoError))
       return
@@ -299,7 +302,31 @@ export default {
     // 静默探测时用户等不及，点「改用账号密码登录」：停掉转圈直接给表单
     stopAutoCheck() {
       this.autoChecking = false
+      // 用户明确要手工登录：把「探测过」的标记清掉（路由守卫不再替我们清），
+      // 否则下次再进登录页会被人记成「已经探过」，永远不自动进了
+      clearSilentTried()
     },
+    // 登录成功离开登录页：**整页跳**，不走 this.$router.replace。
+    //
+    // 为什么必须整页跳（这是用户反复踩到的那件事）：
+    //   SPA 换路由时，浏览器历史里登录页那一格还在。登录之后按 ← 就会退回
+    //   /login —— 令牌还在，守卫又把人弹回应用，看起来就是「按了没反应」，
+    //   或者闪一下登录框。而浏览器没有 API 能删掉历史里中间的某一格，
+    //   站在栈上修（哨兵、replaceState、back 再 forward）只会越补越漏。
+    //   整页导航（location.replace）把「当前这一格」直接换成目标页，
+    //   文档重新加载，历史栈从这一刻起就是干净的，登录页不再存在。
+    //
+    // replace 而不是 href：不能用 push 给历史里再加一格。
+    //
+    // 注意：这一趟 SSO 路上被浏览器记下的中转格（302 链）**删不掉**，
+    // 没有任何 Web API 能删别的历史条目（history.go(-N) 那套实测会把人扔在
+    // 中转页上，因为跨文档的格会触发整页加载、当前文档的监听来不及跑）。
+    // 那些格子的善后放在 /sso/callback 里：已登录的人退回去时直接送回应用，
+    // 不再显示「登录没有完成」。
+    leaveTo(target) {
+      window.location.replace(target)
+    },
+
     validate(formRef) {
       const form = this.$refs[formRef]
       if (!form) return Promise.resolve(false)
@@ -322,7 +349,8 @@ export default {
         this.$message.success('登录成功')
         // fetchMe 拉额度信息；不等它 —— 失败也不影响进页面
         this.$store.dispatch('user/fetchMe')
-        await this.$router.replace(this.redirectTarget)
+        // 整页跳，不发 SPA 导航：见 leaveTo 的说明
+        this.leaveTo(this.redirectTarget)
       } catch (error) {
         // 失败文案已由 request.js 统一弹出（后端原话「用户名或密码错误」等）
       } finally {
@@ -357,7 +385,7 @@ export default {
           })
           this.$message.success('注册成功，已自动登录')
           this.$store.dispatch('user/fetchMe')
-          await this.$router.replace(this.redirectTarget)
+          this.leaveTo(this.redirectTarget)
         } catch (loginError) {
           this.$message.warning('注册成功，请手动登录')
           this.loginForm.username = username
@@ -376,6 +404,10 @@ export default {
     // 失败（比如 .env 没配 OIDC）回来会落在 /login?sso_error=…，
     // 由 created() 里统一翻译成人话。
     onSsoLogin() {
+      // 用户主动要走账号中心：清掉「静默探测已试过」标记。
+      // 清完再跳走，就算这次失败回到 /login?sso_error=…，标记也由 created 重新记上，
+      // 不会自动再探一次又把人甩去账号中心。
+      clearSilentTried()
       redirectToSsoLogin(this.redirectTarget)
     }
   }

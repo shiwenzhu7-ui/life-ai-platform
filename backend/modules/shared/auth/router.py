@@ -20,7 +20,7 @@ V2.0 的 BFF 分工（为什么 secret 只在后端、为什么前端不用改�
 """
 
 import secrets
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from fastapi import APIRouter, Depends, Request, Response, status
 from fastapi.responses import RedirectResponse
@@ -283,19 +283,27 @@ def sso_logout(
     app: str = "",
     redirect: str = "",
 ) -> RedirectResponse:
-    """退出的「无 id_token」兜底：直接把浏览器送回登录页。
+    """退出的「无 id_token」兜底：能去 Keycloak 就去，去不了才只退本地。
 
     正常退出走 /sso/logout/confirm（前端带着 id_token 来）。这个接口留给
     「前端拿不到 id_token」的场景 —— 比如用户清过 sessionStorage、或者用
-    账号密码登录进来、或者升级前登录的旧会话。此时本地一定退了，Keycloak
-    那边退不掉；至少要把人送回登录页，而不是让他卡在半路。
+    账号密码登录进来、或者升级前登录的旧会话。
+
+    即便是这种场景，**也要去 Keycloak 走一趟**：实测只带 client_id +
+    post_logout_redirect_uri、不带 id_token_hint，Keycloak 仍会清掉浏览器里的
+    KEYCLOAK_SESSION。否则「另一个前端」的静默探测还能成功，用户会以为没退掉。
 
     为什么单独一个接口而不是让 confirm 自己降级：confirm 是 GET，前端跳到它
     就没法再执行 JS 把 id_token 补上了。分成两步之后，前端可以在「有
     id_token」和「没有」之间自己选，后端只负责跳。
     """
     front = settings.oidc_frontend_login_of(app or settings.oidc_default_app)
-    return RedirectResponse(url=_safe_next(redirect, front), status_code=status.HTTP_302_FOUND)
+    fallback = _safe_next(redirect, front)
+    landing = _absolute_frontend(fallback, app or settings.oidc_default_app)
+    url = oidc.build_logout_url(
+        app=app or settings.oidc_default_app, id_token="", post_logout_redirect=landing
+    )
+    return RedirectResponse(url=url or fallback, status_code=status.HTTP_302_FOUND)
 
 
 @router.get(
@@ -330,16 +338,42 @@ def sso_logout_confirm(
     """
     front = settings.oidc_frontend_login_of(app or settings.oidc_default_app)
     fallback = _safe_next(redirect, front)
-    if not id_token:
-        return RedirectResponse(url=fallback, status_code=status.HTTP_302_FOUND)
+    # 退出后的落点必须是「绝对 URL 且已在该客户端的注销白名单里」。
+    # 前端只传站内路径（/login），这里拼上该应用自己的 origin 变成
+    # http://localhost:8082/login —— Keycloak 不认相对路径。
+    landing = _absolute_frontend(fallback, app or settings.oidc_default_app)
 
-    # 不让 id_token 进浏览器历史：Keycloak 验完会把浏览器 302 回 fallback，
-    # 我们这边的跳转 URL（含 id_token_hint）只出现在这一跳
+    # 没有 id_token 也去 Keycloak 走一趟：带 client_id + post_logout_redirect_uri
+    # 不带 id_token_hint，Keycloak 同样会清 KEYCLOAK_SESSION。少了这一跳，
+    # 另一个前端（life-web）的静默探测还能成功，"退出"就成了摆设。
     url = oidc.build_logout_url(
-        app=app or settings.oidc_default_app, id_token=id_token, post_logout_redirect=fallback
+        app=app or settings.oidc_default_app, id_token=id_token, post_logout_redirect=landing
     )
-    # 没配 issuer、或者 Keycloak 那边推不出端点 → 退化成「只退本地」
+    # 没配 issuer、或该 app 没配 client → 退化成「只退本地」
     return RedirectResponse(url=url or fallback, status_code=status.HTTP_302_FOUND)
+
+
+def _absolute_frontend(path: str, app: str) -> str:
+    """把站内路径拼成该应用前端的绝对地址。
+
+    /login  ->  http://localhost:8082/login
+    用的是 OIDC_FRONTEND_LOGINS 里登记过的地址做基底（那个地址本身就已在
+    Keycloak 的「有效的注销后重定向URI」白名单里）。拼不出来就原样返回，
+    让 Keycloak 去拒 —— 本地不做白名单猜测。
+    """
+    base = settings.oidc_frontend_login_of(app)
+    if not base:
+        return path
+    try:
+        parts = urlsplit(base)
+    except ValueError:
+        return path
+    if not parts.scheme or not parts.netloc:
+        return path
+    origin = f"{parts.scheme}://{parts.netloc}"
+    if path.startswith(origin):
+        return path
+    return origin + path
 
 
 def _safe_next(value: str, fallback: str) -> str:

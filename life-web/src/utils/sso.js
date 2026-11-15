@@ -62,12 +62,68 @@ export function safeNextPath(raw, fallback = '/') {
 // silent=true 时带 prompt=none（OIDC 静默认证）：Keycloak 绝不弹登录框，
 // 已经登着就把 code 发回来（用户感觉是「秒进」），没登着就回 sso_error=sso_silent。
 // 这是「A 应用登录过，打开 B 应用直接进去」的实现方式。
+// 用 location.replace 而不是 href：跳去账号中心这一下**不该在历史栈里留一格**。
+// 用 href 的话，登录页身后就压着「登录页」这一格，账号中心那格再压上去 ——
+// 用户在登录页按「后退」要走两下才出得去，而且中间还会闪一下账号中心。
+// replace 把这格换掉，代价是「从账号中心回来按后退」会直接跳过账号中心，
+// 这在 Web 上本来就是正常行为（Google/GitHub 登录后也是这样）。
 export function redirectToSsoLogin(nextPath = '/', silent = false) {
   const base = process.env.VUE_APP_API_BASE || '/api/v1'
   const params = [`app=${encodeURIComponent(APP_NAME)}`]
   if (nextPath && nextPath !== '/') params.push(`next=${encodeURIComponent(nextPath)}`)
   if (silent) params.push('silent=true')
-  window.location.href = `${base}/auth/sso/login?${params.join('&')}`
+  // 记下出发时的历史长度：回来之后要把这一趟留下的中转格全清掉
+  markSsoDeparture()
+  window.location.replace(`${base}/auth/sso/login?${params.join('&')}`)
+}
+
+// ---------- 关于「登录流程留在历史栈里的格子」----------
+//
+// 事实（实测过，别再来一遍）：从 /login 出发做 SSO，路上要经过
+//   /api/v1/auth/sso/login → Keycloak → /api/v1/auth/sso/callback → /sso/callback
+// 这串 302。浏览器给**每次重定向各记一个历史条目**，而 history.replace 只能换掉
+// 当前这一格，replaceState 也只能改当前格。**没有任何 Web API 能删掉别的格。**
+//
+// 试过并证明行不通的：
+//   history.go(-N) 再 go(+N) —— 退到跨文档的中转格时，那个文档已经被销毁，
+//   当前文档的 popstate 还没来得及跑，人就被扔在中转页上了。探针实测 got=[]。
+//
+// 所以结论是：中转格删不掉，只能让它「不好看但不伤人」——
+// 已登录的人退到 /sso/callback 时不该再看到「登录没有完成」，
+// 这一点在 views/sso/Callback.vue 的 created 里处理（有令牌就直接回应用）。
+//
+// 下面这个标记函数保留：它记下「这一趟 SSO 是从多长的历史出发的」，
+// 供 Callback 判断「我是不是被 ← 退回来的」（长度没变 = 是退回来的，
+// 长度变长了 = 是新的一趟登录），从而决定是跳回去还是正常显示错误。
+const SSO_BASELINE_KEY = 'lifeai_sso_baseline_len'
+
+// 出发去做 SSO 的那一刻调用。只在「当前历史长度比上次记的大」时更新，
+// 避免死循环复发时把基线越推越高。
+export function markSsoDeparture() {
+  try {
+    const now = window.history.length
+    const prev = Number(window.sessionStorage.getItem(SSO_BASELINE_KEY) || 0)
+    if (!prev || now > prev) {
+      window.sessionStorage.setItem(SSO_BASELINE_KEY, String(now))
+    }
+  } catch (e) {
+    // 隐私模式：退化成「不清历史」，功能不受影响
+  }
+}
+
+export function clearSsoBaseline() {
+  try {
+    window.sessionStorage.removeItem(SSO_BASELINE_KEY)
+  } catch (e) {
+    // 同上
+  }
+}
+
+// 「登录中转」留下的地址：后端发起登录的接口、后端 callback、前端 callback 页。
+// 只要落在这些地址上，就说明用户退到了登录流程里，不该让他看见。
+// 目前由 views/sso/Callback.vue 使用：已登录时直接送回应用。
+export function isSsoTransitUrl(href) {
+  return /\/auth\/sso\/(login|callback|logout)/.test(href) || /\/sso\/callback/.test(href)
 }
 
 // 静默探测只试一次：不试的话每次打开登录页都要多跳一转；
@@ -108,23 +164,75 @@ export function silentAlreadyTried() {
 // 为什么存 sessionStorage 而不是 localStorage：
 //   1. 关掉标签页就该失效 —— 它和「这一次登录」绑定；
 //   2. 它是 Keycloak 签的、能证明身份的令牌，长期留在盘上等于多一个泄露面。
-// 为什么存前端而不是后端：后端无状态（不建会话表），退出的凭据必须由调用方带回来。
+// 为什么存前端而不是后端：
+//   后端无状态（不建会话表），退出的凭据必须由调用方带回来。
 const ID_TOKEN_KEY = 'lifeai_sso_id_token'
 
-export function saveIdToken(idToken) {
+// id_token 的 aud —— 也就是「这个 token 是哪个应用换来的」。
+//
+// 为什么必须和 id_token 一起存：
+//   Keycloak 的注销端点有个硬规则：一旦带上 id_token_hint，就会拿这个 token
+//   的 aud 去比对请求里的 client_id，对不上直接报「无效重定向uri」（400 白页）。
+//   同一个浏览器里两个前端共用一套 Cookie，但各自换到的 id_token 是不同
+//   client 签的。如果在 8080 登录过、再到 8082 退出，手里那个 token 的 aud
+//   是 life-web，而请求带的是 admin-web，Keycloak 就翻脸了。
+//   所以退出时先对一下，对不上干脆不带 hint —— 不带 hint 一样能清会话。
+const AUD_KEY = 'lifeai_sso_id_token_aud'
+
+// aud 可能是字符串（单值）也可能是数组（多值），统一成字符串数组。
+function audList(claims) {
+  const aud = claims && claims.aud
+  if (!aud) return []
+  return Array.isArray(aud) ? aud.map(String) : [String(aud)]
+}
+
+// 读出 JWT 的 payload。只读不验签：它的用途只是「本地比对一下 unverified 的
+// aud」，真正的验签在后端（decode_id_token）。这里手写 base64 解码是为了不去
+// 依赖 atob 的补位规则。
+function readClaims(jwtToken) {
+  try {
+    const parts = String(jwtToken).split('.')
+    if (parts.length < 2) return null
+    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4)
+    const binary = window.atob(padded)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+    const json = new TextDecoder('utf-8').decode(bytes)
+    return JSON.parse(json)
+  } catch (e) {
+    return null
+  }
+}
+
+export function saveIdToken(idToken, app = APP_NAME) {
   if (!idToken || typeof idToken !== 'string') return
+  const claims = readClaims(idToken)
+  const aud = audList(claims)
+  const owner = aud.indexOf(app) >= 0 ? app : aud[0] || app
   try {
     window.sessionStorage.setItem(ID_TOKEN_KEY, idToken)
+    window.sessionStorage.setItem(AUD_KEY, owner)
   } catch (e) {
     // 隐私模式下拿不到 storage：退出会退化成「只退本地」，不影响登录
   }
 }
 
-export function takeIdToken() {
+// 取出并清掉 id_token，**只在本应用能认领它时返回**，否则返回空串。
+// 认领条件：token 的 aud 里包含本应用名，或者没有记录归属时以 aud 首项为准。
+// 认不领也一并删掉 —— 那是别的应用的东西，留着只会下次再踩同一个坑。
+export function takeIdToken(app = APP_NAME) {
   try {
-    const v = window.sessionStorage.getItem(ID_TOKEN_KEY) || ''
+    const value = window.sessionStorage.getItem(ID_TOKEN_KEY) || ''
+    const owner = window.sessionStorage.getItem(AUD_KEY) || ''
     window.sessionStorage.removeItem(ID_TOKEN_KEY)
-    return v
+    window.sessionStorage.removeItem(AUD_KEY)
+    if (!value) return ''
+    const aud = audList(readClaims(value))
+    if (!aud.length) return value // 解不出来就信它，交给 Keycloak 去拒
+    const mine = aud.indexOf(app) >= 0
+    const matchesOwner = !owner || owner === app
+    return mine && matchesOwner ? value : ''
   } catch (e) {
     return ''
   }
@@ -133,6 +241,7 @@ export function takeIdToken() {
 export function clearIdToken() {
   try {
     window.sessionStorage.removeItem(ID_TOKEN_KEY)
+    window.sessionStorage.removeItem(AUD_KEY)
   } catch (e) {
     // 同上
   }
@@ -149,11 +258,23 @@ export function clearIdToken() {
 //   /logout 只负责「回到前端、让前端把 id_token 带上来」，免得我们把 id_token
 //   放在 URL 里暴露给一段先执行 JS 的页面。这里 id_token 已经在手上，直接
 //   交给 confirm 一步到位。
+//
+// 为什么 id_token 要「认领」才带（takeIdToken 里判断 aud）：
+//   Keycloak 拿 id_token_hint 的 aud 去比对 client_id，对不上就是 400
+//   「无效重定向uri」。跨应用（在 8080 登录、到 8082 退出）时手里那个 token
+//   不是本应用签的，带了反而炸；不带 hint 照样能清 Keycloak 会话，只是少一层
+//   「确认这次退出就是给这个会话的」。宁可少带，也不能让退出卡在 400。
+//
+// 为什么用 location.replace 而不是 location.href：
+//   href 会在历史里**再压一格**。退出这条路上已经有 Keycloak 的注销页和
+//   post_logout_redirect 回来的登录页两跳，如果起点也留一格，用户按后退就会
+//   退回「刚才那个已经退出的后台页」。replace 把起点这一格直接换掉，后退栈
+//   里就不存在它了。
 export function redirectToSsoLogout({ redirect = '/login' } = {}) {
   const base = process.env.VUE_APP_API_BASE || '/api/v1'
   const params = [`app=${encodeURIComponent(APP_NAME)}`]
   if (redirect) params.push(`redirect=${encodeURIComponent(redirect)}`)
-  const idToken = takeIdToken()
+  const idToken = takeIdToken(APP_NAME)
   if (idToken) params.push(`id_token=${encodeURIComponent(idToken)}`)
-  window.location.href = `${base}/auth/sso/logout/confirm?${params.join('&')}`
+  window.location.replace(`${base}/auth/sso/logout/confirm?${params.join('&')}`)
 }

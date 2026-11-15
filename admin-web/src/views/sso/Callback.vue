@@ -28,7 +28,7 @@
 //      是管理员才去 /users，否则直接送 /403 并说明原因。
 //   3. 本页必须是 public（路由守卫放行）：此刻令牌还没进 localStorage，
 //      守卫要是拿 hasValidToken() 判断，会把刚登录的人踢回 /login —— 死循环。
-import { setToken } from '@/utils/auth'
+import { setToken, hasValidToken } from '@/utils/auth'
 import { saveIdToken, safeNextPath, ssoErrorText } from '@/utils/sso'
 
 // 等 /auth/me 的最长时间。它挂了也不能让人卡在「正在进入……」上。
@@ -52,6 +52,18 @@ export default {
     const query = this.$route.query
     const token = query.token
     const ssoError = query.sso_error
+
+    // ⚠️ **已经登录的人，不该再看到「登录没有完成」**。
+    // 这一页会被浏览器记进历史栈（登录路上的 302 链各占一格，页面删不掉），
+    // 用户登录成功后连按几次 ← 就会退回到这里。无条件显示失败页，
+    // 就会出现「明明已经登进去了，按 ← 看到登录失败」。
+    // 手里有能用的令牌 = 他已经是登录状态，这个失败页对他没有信息量，直接送回应用。
+    if (hasValidToken()) {
+      this.phase = 'done'
+      this.nextPath = safeNextPath(query.next)
+      window.location.replace(this.nextPath)
+      return
+    }
 
     if (ssoError) {
       this.fail(ssoErrorText(ssoError))
@@ -107,11 +119,18 @@ export default {
 
     goNext() {
       if (this.$route.path !== '/sso/callback') return
-      this.$router.replace(this.nextPath)
+      // 整页跳，不走 this.$router.replace。理由同 life-web 的 Callback：
+      // SPA 换路由会把 /login 和 /sso/callback 留在历史里，登录后按 ← 就退回登录页。
+      // 整页 replace 把当前这一格换成目标页，历史栈从此没有登录流程的格子。
+      window.location.replace(this.nextPath)
     },
 
+    // 整页跳而不是 router.replace：
+    //   1. 地址栏里还挂着 ?sso_error=…，replace 成 /login 后再点同一个错误码
+    //      会算出「同一条路由」，Vue Router 直接拒绝——按钮看着就是没反应；
+    //   2. 整页刷新把这页的状态彻底清零，登录页的静默探测从干净状态开始。
     backToLogin() {
-      this.$router.replace('/login')
+      window.location.replace('/login')
     }
   }
 }
